@@ -119,6 +119,17 @@ python main.py
 | `/stop` | 停止当前播放 | `/stop` |
 | `/sb` | 发送测试图片 | `/sb` |
 
+### 📸 功能演示截图
+
+#### 🎵 网易云音乐播放
+![网易云音乐示例](doc/Example%20Image/netease.png)
+
+#### 🎶 QQ音乐播放  
+![QQ音乐示例](doc/Example%20Image/QQ.png)
+
+#### 📺 Bilibili音频播放
+![Bilibili示例](doc/Example%20Image/BILiBILI.png)
+
 ### 消息格式示例
 
 **音乐播放响应**：
