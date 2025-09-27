@@ -1,0 +1,15 @@
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+venv/
+.env/
+
+# IDE 配置
+.idea/
+.vscode/
+
+# 本地私密配置（不要上传）
+config.py
+private_key.py
