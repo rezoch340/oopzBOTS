@@ -8,7 +8,7 @@ Oopz配置文件
 # 固定的请求头参数
 OOPZ_CONFIG = {
     # 应用版本号（固定）
-    "app_version": "67442",
+    "app_version": "69514",
 
     # 渠道（固定）
     "channel": "Web",
