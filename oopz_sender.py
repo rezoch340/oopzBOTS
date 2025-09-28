@@ -19,7 +19,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.backends import default_backend
 
-
 # 导入配置
 from config import OOPZ_CONFIG, DEFAULT_HEADERS
 
@@ -30,6 +29,7 @@ def get_image_info(file_path: str):
         width, height = img.size
     file_size = os.path.getsize(file_path)
     return width, height, file_size
+
 
 class SimpleClientMessageIdGenerator:
     """简化版客户端消息ID生成器"""
@@ -84,7 +84,7 @@ class SimpleSigner:
         return self.id_generator.generate()
 
     def sign_data(self, data: str) -> str:
-        """RSA签名"""
+        """RSA签名 - 尝试PSS算法"""
         data_bytes = data.encode('utf-8')
         signature = self.private_key.sign(
             data_bytes,
@@ -95,14 +95,20 @@ class SimpleSigner:
 
     def create_oopz_headers(self, url_path: str, body_str: str) -> Dict[str, str]:
         """创建Oopz签名请求头（使用固定配置）"""
+        import hashlib
+
         # 生成动态参数
         request_id = self.generate_request_id()
         timestamp = self.generate_timestamp()
 
-        # 构建签名数据
-        sign_data = url_path + body_str
+        # 🎯 正确的签名方法（通过JS日志分析得出）：
+        # 1. URL路径 + 请求体 -> MD5哈希
+        # 2. MD5哈希 + 时间戳 -> 最终签名数据
+        # 3. RSA签名最终数据
+        hash_input = url_path + body_str
+        md5_hash = hashlib.md5(hash_input.encode('utf-8')).hexdigest()
+        sign_data = md5_hash + timestamp
         signature = self.sign_data(sign_data)
-
         # 使用配置中的固定参数
         return {
             'Oopz-Sign': signature,
@@ -197,7 +203,8 @@ class SimpleOopzSender:
 
         # 发送HTTP请求
         try:
-            response = self.session.post(url, headers=headers, data=body_str)
+            # 🔧 修复编码问题：确保请求体使用 UTF-8 编码
+            response = self.session.post(url, headers=headers, data=body_str.encode('utf-8'))
 
             print(f"📥 响应状态: {response.status_code}")
             if response.text:
@@ -233,7 +240,7 @@ class SimpleOopzSender:
         headers.update(self.signer.create_oopz_headers(url_path, body_str))
 
         # 1. 获取 uploadUrl
-        resp = self.session.put(url, headers=headers, data=body_str)
+        resp = self.session.put(url, headers=headers, data=body_str.encode('utf-8'))
         if resp.status_code != 200:
             raise Exception(f"获取上传URL失败: {resp.text}")
 
@@ -249,7 +256,6 @@ class SimpleOopzSender:
             raise Exception(f"文件上传失败: {put_resp.text}")
 
         return {"fileKey": file_key, "url": upload_url.split("?")[0]}
-
 
     def send_multiple(self, messages: list, interval: float = 1.0):
         """批量发送消息"""
@@ -299,7 +305,7 @@ class SimpleOopzSender:
         headers = sender.session.headers.copy()
         headers.update(sender.signer.create_oopz_headers(url_path, body_str))
 
-        resp = sender.session.put(url, headers=headers, data=body_str)
+        resp = sender.session.put(url, headers=headers, data=body_str.encode('utf-8'))
         resp.raise_for_status()
         data = resp.json()["data"]
 
@@ -359,7 +365,7 @@ class SimpleOopzSender:
             headers = self.session.headers.copy()
             headers.update(self.signer.create_oopz_headers(url_path, body_str))
 
-            resp2 = self.session.put(url, headers=headers, data=body_str)
+            resp2 = self.session.put(url, headers=headers, data=body_str.encode('utf-8'))
             resp2.raise_for_status()
             data = resp2.json()["data"]
 
@@ -392,6 +398,7 @@ class SimpleOopzSender:
 
         except Exception as e:
             return {"code": "error", "message": f"❌ 上传失败: {e}", "data": None}
+
 
 def demo():
     """演示简化版发送器"""
