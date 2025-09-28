@@ -153,7 +153,7 @@ def handle_command(msg_data, sender):
     subcommand = parts[1] if len(parts) > 1 else None
     arg = parts[2] if len(parts) > 2 else None
 
-    if command == "/sb":
+    if command == "/test":
         response = testIMG(channel)
         # 结束
         return
