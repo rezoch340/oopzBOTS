@@ -363,40 +363,54 @@ def netPlay(keyword, channel=None, user=None):
         if cache_hit:
             text += "\n💾 (封面来自缓存)"
     
-    # 添加到队列
-    queue_position = queue_manager.add_to_queue({
-        'platform': 'netease',
-        'song_id': song_id,
-        'name': data['name'],
-        'artists': data['artists'],
-        'album': data['album'],
-        'url': data['url'],
-        'cover': data.get('cover'),
-        'duration': data['durationText'],
-        'attachments': attachments,
-        'channel': channel,
-        'user': user
-    })
-    
-    # 检查播放器实际状态
+    # 先检查播放器实际状态和队列状态
     player_status = get_player_status()
     is_playing = player_status.get('playing', False)
     current_song = queue_manager.get_current()
+    queue_length = queue_manager.get_queue_length()
     
-    # 只有在播放器空闲且队列为空时才立即播放
-    if not is_playing and current_song is None and queue_position == 0:
-        next_song = queue_manager.play_next()
-        if next_song:
-            # 生成播放UUID并保存
-            import uuid
-            play_uuid = str(uuid.uuid4())
-            next_song['play_uuid'] = play_uuid
-            queue_manager.set_current(next_song)
-            
-            t = threading.Thread(target=play, args=(next_song['url'], None, play_uuid))
-            t.start()
-            text += "\n▶️ 立即播放"
+    # 如果没有播放任何歌曲且队列为空，直接播放
+    if not is_playing and current_song is None and queue_length == 0:
+        # 准备歌曲数据
+        song_data = {
+            'platform': 'netease',
+            'song_id': song_id,
+            'name': data['name'],
+            'artists': data['artists'],
+            'album': data['album'],
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data['durationText'],
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        }
+        
+        # 生成播放UUID并保存
+        import uuid
+        play_uuid = str(uuid.uuid4())
+        song_data['play_uuid'] = play_uuid
+        queue_manager.set_current(song_data)
+        
+        t = threading.Thread(target=play, args=(song_data['url'], None, play_uuid))
+        t.start()
+        text += "\n▶️ 立即播放"
     else:
+        # 添加到队列
+        queue_position = queue_manager.add_to_queue({
+            'platform': 'netease',
+            'song_id': song_id,
+            'name': data['name'],
+            'artists': data['artists'],
+            'album': data['album'],
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data['durationText'],
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        })
+        
         # 计算实际位置：当前播放的算第1位，队列从第2位开始
         actual_position = queue_position + 1 + (1 if current_song or is_playing else 0)
         text += f"\n📋 已加入队列 (位置: {actual_position})"
@@ -467,40 +481,54 @@ def bilibiliMp3(keyword, channel=None, user=None):
         if cache_hit:
             text += "\n💾 (封面来自缓存)"
     
-    # 添加到队列
-    queue_position = queue_manager.add_to_queue({
-        'platform': 'bilibili',
-        'song_id': song_id,
-        'name': data.get('name', '未知'),
-        'artists': data.get('artists', 'B站'),
-        'album': 'Bilibili',
-        'url': data['url'],
-        'cover': data.get('cover'),
-        'duration': data.get('durationText', '未知'),
-        'attachments': attachments,
-        'channel': channel,
-        'user': user
-    })
-    
-    # 检查播放器实际状态
+    # 先检查播放器实际状态和队列状态
     player_status = get_player_status()
     is_playing = player_status.get('playing', False)
     current_song = queue_manager.get_current()
+    queue_length = queue_manager.get_queue_length()
     
-    # 只有在播放器空闲且队列为空时才立即播放
-    if not is_playing and current_song is None and queue_position == 0:
-        next_song = queue_manager.play_next()
-        if next_song:
-            # 生成播放UUID并保存
-            import uuid
-            play_uuid = str(uuid.uuid4())
-            next_song['play_uuid'] = play_uuid
-            queue_manager.set_current(next_song)
-            
-            t = threading.Thread(target=play, args=(next_song['url'], None, play_uuid))
-            t.start()
-            text += "\n▶️ 立即播放"
+    # 如果没有播放任何歌曲且队列为空，直接播放
+    if not is_playing and current_song is None and queue_length == 0:
+        # 准备歌曲数据
+        song_data = {
+            'platform': 'bilibili',
+            'song_id': song_id,
+            'name': data.get('name', '未知'),
+            'artists': data.get('artists', 'B站'),
+            'album': 'Bilibili',
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data.get('durationText', '未知'),
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        }
+        
+        # 生成播放UUID并保存
+        import uuid
+        play_uuid = str(uuid.uuid4())
+        song_data['play_uuid'] = play_uuid
+        queue_manager.set_current(song_data)
+        
+        t = threading.Thread(target=play, args=(song_data['url'], None, play_uuid))
+        t.start()
+        text += "\n▶️ 立即播放"
     else:
+        # 添加到队列
+        queue_position = queue_manager.add_to_queue({
+            'platform': 'bilibili',
+            'song_id': song_id,
+            'name': data.get('name', '未知'),
+            'artists': data.get('artists', 'B站'),
+            'album': 'Bilibili',
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data.get('durationText', '未知'),
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        })
+        
         # 计算实际位置：当前播放的算第1位，队列从第2位开始
         actual_position = queue_position + 1 + (1 if current_song or is_playing else 0)
         text += f"\n📋 已加入队列 (位置: {actual_position})"
@@ -557,40 +585,54 @@ def qqPlay(keyword, channel=None, user=None):
         if cache_hit:
             text += "\n💾 (封面来自缓存)"
     
-    # 添加到队列
-    queue_position = queue_manager.add_to_queue({
-        'platform': 'qq',
-        'song_id': song_id,
-        'name': data['name'],
-        'artists': data['artists'],
-        'album': data['album'],
-        'url': data['url'],
-        'cover': data.get('cover'),
-        'duration': data['durationText'],
-        'attachments': attachments,
-        'channel': channel,
-        'user': user
-    })
-    
-    # 检查播放器实际状态
+    # 先检查播放器实际状态和队列状态
     player_status = get_player_status()
     is_playing = player_status.get('playing', False)
     current_song = queue_manager.get_current()
+    queue_length = queue_manager.get_queue_length()
     
-    # 只有在播放器空闲且队列为空时才立即播放
-    if not is_playing and current_song is None and queue_position == 0:
-        next_song = queue_manager.play_next()
-        if next_song:
-            # 生成播放UUID并保存
-            import uuid
-            play_uuid = str(uuid.uuid4())
-            next_song['play_uuid'] = play_uuid
-            queue_manager.set_current(next_song)
-            
-            t = threading.Thread(target=play, args=(next_song['url'], 'qq', play_uuid))
-            t.start()
-            text += "\n▶️ 立即播放"
+    # 如果没有播放任何歌曲且队列为空，直接播放
+    if not is_playing and current_song is None and queue_length == 0:
+        # 准备歌曲数据
+        song_data = {
+            'platform': 'qq',
+            'song_id': song_id,
+            'name': data['name'],
+            'artists': data['artists'],
+            'album': data['album'],
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data['durationText'],
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        }
+        
+        # 生成播放UUID并保存
+        import uuid
+        play_uuid = str(uuid.uuid4())
+        song_data['play_uuid'] = play_uuid
+        queue_manager.set_current(song_data)
+        
+        t = threading.Thread(target=play, args=(song_data['url'], 'qq', play_uuid))
+        t.start()
+        text += "\n▶️ 立即播放"
     else:
+        # 添加到队列
+        queue_position = queue_manager.add_to_queue({
+            'platform': 'qq',
+            'song_id': song_id,
+            'name': data['name'],
+            'artists': data['artists'],
+            'album': data['album'],
+            'url': data['url'],
+            'cover': data.get('cover'),
+            'duration': data['durationText'],
+            'attachments': attachments,
+            'channel': channel,
+            'user': user
+        })
+        
         # 计算实际位置：当前播放的算第1位，队列从第2位开始
         actual_position = queue_position + 1 + (1 if current_song or is_playing else 0)
         text += f"\n📋 已加入队列 (位置: {actual_position})"
@@ -756,7 +798,7 @@ def auto_play_next_monitor():
                         time.sleep(5)
             
             # 每 5 秒检查一次（增加间隔，减少频繁检查）
-            time.sleep(5)
+            time.sleep(10)
             
         except Exception as e:
             logger.error(f"自动播放: 监控出错 - {e}")
