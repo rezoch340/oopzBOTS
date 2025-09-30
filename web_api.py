@@ -290,6 +290,17 @@ async def play_next(request: Request, channel: Optional[str] = None):
             next_song['play_uuid'] = play_uuid
             queue_manager.set_current(next_song)
             
+            # 🔥 更新播放统计（实际播放时）
+            SongCache.update_play_stats(
+                song_id=next_song.get('song_id'),
+                platform=next_song.get('platform'),
+                channel_id=channel or next_song.get('channel'),
+                user_id=None  # Web API 调用时没有用户信息
+            )
+            
+            # 更新平台统计
+            Statistics.update_today(next_song.get('platform'), cache_hit=False)
+            
             url = next_song.get('url')
             model = 'qq' if next_song.get('platform') == 'qq' else None
             

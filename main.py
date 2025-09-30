@@ -193,6 +193,17 @@ def handle_command(msg_data, sender):
             next_song['play_uuid'] = play_uuid
             queue_manager.set_current(next_song)  # 更新包含UUID的歌曲数据
             
+            # 🔥 更新播放统计（实际播放时）
+            SongCache.update_play_stats(
+                song_id=next_song.get('song_id'),
+                platform=next_song.get('platform'),
+                channel_id=channel,
+                user_id=user
+            )
+            
+            # 更新平台统计
+            Statistics.update_today(next_song.get('platform'), cache_hit=False)
+            
             # 根据平台决定播放参数
             model = 'qq' if next_song.get('platform') == 'qq' else None
             t = threading.Thread(target=play, args=(next_song['url'], model, play_uuid))
@@ -748,6 +759,17 @@ def auto_play_next_monitor():
                         play_uuid = str(uuid.uuid4())
                         next_song['play_uuid'] = play_uuid
                         queue_manager.set_current(next_song)
+                        
+                        # 🔥 更新播放统计（实际播放时）
+                        SongCache.update_play_stats(
+                            song_id=next_song.get('song_id'),
+                            platform=next_song.get('platform'),
+                            channel_id=next_song.get('channel'),
+                            user_id=next_song.get('user')
+                        )
+                        
+                        # 更新平台统计
+                        Statistics.update_today(next_song.get('platform'), cache_hit=False)
                         
                         model = 'qq' if next_song.get('platform') == 'qq' else None
                         play(next_song['url'], model, play_uuid)

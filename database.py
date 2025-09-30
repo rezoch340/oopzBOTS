@@ -7,12 +7,17 @@
 
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict
 import threading
 
 # 数据库连接（线程安全）
 _local = threading.local()
+
+def get_china_time() -> str:
+    """获取中国时区的当前时间字符串 (UTC+8)"""
+    china_tz = timezone(timedelta(hours=8))
+    return datetime.now(china_tz).strftime('%Y-%m-%d %H:%M:%S')
 
 
 def get_db():
@@ -25,11 +30,13 @@ def get_db():
 
 def init_database():
     """初始化数据库表"""
+    current_china_time = get_china_time()
+    
     conn = get_db()
     cursor = conn.cursor()
     
     # 图片缓存表
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS image_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source_id TEXT NOT NULL UNIQUE,
@@ -42,14 +49,14 @@ def init_database():
             file_size INTEGER,
             hash TEXT,
             attachment_data TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_used_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT '{current_china_time}',
+            last_used_at TEXT DEFAULT '{current_china_time}',
             use_count INTEGER DEFAULT 1
         )
     ''')
     
     # 歌曲缓存表（统计用）
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS song_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             song_id TEXT NOT NULL,
@@ -61,8 +68,8 @@ def init_database():
             cover_url TEXT,
             play_url TEXT,
             image_cache_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            last_played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TEXT DEFAULT '{current_china_time}',
+            last_played_at TEXT DEFAULT '{current_china_time}',
             play_count INTEGER DEFAULT 1,
             UNIQUE(song_id, platform),
             FOREIGN KEY (image_cache_id) REFERENCES image_cache(id)
@@ -70,14 +77,14 @@ def init_database():
     ''')
     
     # 播放历史表
-    cursor.execute('''
+    cursor.execute(f'''
         CREATE TABLE IF NOT EXISTS play_history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             song_cache_id INTEGER NOT NULL,
             platform TEXT NOT NULL,
             channel_id TEXT,
             user_id TEXT,
-            played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            played_at TEXT DEFAULT '{current_china_time}',
             FOREIGN KEY (song_cache_id) REFERENCES song_cache(id)
         )
     ''')
@@ -197,6 +204,43 @@ class SongCache:
     """歌曲缓存管理器"""
     
     @staticmethod
+    def update_play_stats(song_id: str, platform: str, channel_id: str = None, user_id: str = None) -> bool:
+        """更新歌曲播放统计（实际播放时调用）"""
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # 查找歌曲
+        cursor.execute('''
+            SELECT id FROM song_cache WHERE song_id = ? AND platform = ?
+        ''', (song_id, platform))
+        row = cursor.fetchone()
+        
+        if row:
+            song_cache_id = row[0]
+            current_time = get_china_time()
+            
+            # 更新播放时间和次数 - 使用中国时区时间戳
+            cursor.execute('''
+                UPDATE song_cache 
+                SET last_played_at = ?, 
+                    play_count = play_count + 1
+                WHERE id = ?
+            ''', (current_time, song_cache_id))
+            
+            # 添加播放历史
+            cursor.execute('''
+                INSERT INTO play_history (song_cache_id, platform, channel_id, user_id)
+                VALUES (?, ?, ?, ?)
+            ''', (song_cache_id, platform, channel_id, user_id))
+            
+            conn.commit()
+            print(f"[SongCache] 更新播放统计: {song_id} ({platform}) - 播放次数 +1, 中国时间: {current_time}")
+            return True
+        else:
+            print(f"[SongCache] 警告: 找不到歌曲统计记录: {song_id} ({platform})")
+            return False
+    
+    @staticmethod
     def get_or_create(song_id: str, platform: str, song_data: Dict, image_cache_id: Optional[int] = None) -> int:
         """获取或创建歌曲缓存"""
         conn = get_db()
@@ -209,23 +253,28 @@ class SongCache:
         row = cursor.fetchone()
         
         if row:
-            # 更新播放时间和次数
+            # 更新播放时间和次数 - 使用中国时区
+            current_time = get_china_time()
+            
             cursor.execute('''
                 UPDATE song_cache 
-                SET last_played_at = CURRENT_TIMESTAMP, 
+                SET last_played_at = ?, 
                     play_count = play_count + 1,
                     image_cache_id = COALESCE(?, image_cache_id)
                 WHERE id = ?
-            ''', (image_cache_id, row[0]))
+            ''', (current_time, image_cache_id, row[0]))
             conn.commit()
             return row[0]
         else:
-            # 创建新记录
+            # 创建新记录 - 使用中国时区时间
+            current_time = get_china_time()
+            
             cursor.execute('''
                 INSERT INTO song_cache (
                     song_id, platform, song_name, artist, album, 
-                    duration, cover_url, play_url, image_cache_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration, cover_url, play_url, image_cache_id,
+                    created_at, last_played_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 song_id,
                 platform,
@@ -235,7 +284,9 @@ class SongCache:
                 song_data.get('durationText'),
                 song_data.get('cover'),
                 song_data.get('url'),
-                image_cache_id
+                image_cache_id,
+                current_time,
+                current_time
             ))
             conn.commit()
             return cursor.lastrowid
@@ -243,12 +294,14 @@ class SongCache:
     @staticmethod
     def add_play_history(song_cache_id: int, platform: str, channel_id: str = None, user_id: str = None):
         """添加播放历史"""
+        current_time = get_china_time()
+        
         conn = get_db()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO play_history (song_cache_id, platform, channel_id, user_id)
-            VALUES (?, ?, ?, ?)
-        ''', (song_cache_id, platform, channel_id, user_id))
+            INSERT INTO play_history (song_cache_id, platform, channel_id, user_id, played_at)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (song_cache_id, platform, channel_id, user_id, current_time))
         conn.commit()
     
     @staticmethod
@@ -295,7 +348,9 @@ class Statistics:
         """更新今日统计"""
         conn = get_db()
         cursor = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
+        # 使用中国时区的日期
+        china_tz = timezone(timedelta(hours=8))
+        today = datetime.now(china_tz).strftime('%Y-%m-%d')
         
         # 获取或创建今日统计
         cursor.execute('''
@@ -321,7 +376,9 @@ class Statistics:
         """获取今日统计"""
         conn = get_db()
         cursor = conn.cursor()
-        today = datetime.now().strftime('%Y-%m-%d')
+        # 使用中国时区的日期
+        china_tz = timezone(timedelta(hours=8))
+        today = datetime.now(china_tz).strftime('%Y-%m-%d')
         
         cursor.execute('SELECT * FROM statistics WHERE date = ?', (today,))
         row = cursor.fetchone()
