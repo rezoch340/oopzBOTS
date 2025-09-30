@@ -148,10 +148,10 @@ def on_open(ws):
 def get_player_status():
     """获取 AudioService 播放器状态（优先从 Redis 缓存读取）"""
     # 先尝试从 Redis 缓存读取
-    cached_status = queue_manager.get_player_status()
+    cached_status = queue_manager.player_status_from_service()
     if cached_status:
         return cached_status
-    
+
     # 缓存不存在或过期，从 AudioService 获取并更新到 Redis
     return queue_manager.update_player_status_from_service(AUDIOSERVICE)
 
@@ -730,56 +730,18 @@ def auto_play_next_monitor():
     while True:
         try:
             # 强制从 AudioService 获取最新状态，避免缓存问题
-            status = queue_manager.update_player_status_from_service(AUDIOSERVICE)
+            status = queue_manager.player_status_from_service()
             current_time = time.time()
             
             # 如果没有在播放，检查队列是否有歌曲
-            if not status.get("playing", False):
-                current = queue_manager.get_current()
+            if not (status or {}).get("playing", False):
                 queue_length = queue_manager.get_queue_length()
-                
-                # 检查是否刚刚播放过（10秒内），避免重复触发
-                if current_time - last_play_time < 10:
-                    time.sleep(3)
-                    continue
-                
-                # 如果有当前歌曲但没在播放，说明播放完成了
-                if current:
-                    # logger.info(f"自动播放: 检测到播放完成 - {current.get('name')}")
-                    
-                    # 检查队列是否有下一首
-                    if queue_length > 0:
-                        # 播放下一首
-                        next_song = queue_manager.play_next()
-                        if next_song:
-                            logger.info(f"自动播放: 开始播放 - {next_song.get('name')}")
-                            
-                            # 生成播放UUID并保存
-                            import uuid
-                            play_uuid = str(uuid.uuid4())
-                            next_song['play_uuid'] = play_uuid
-                            queue_manager.set_current(next_song)
-                            
-                            model = 'qq' if next_song.get('platform') == 'qq' else None
-                            play(next_song['url'], model, play_uuid)
-                            last_play_time = current_time
-                            
-                            # 发送播放通知
-                            send_now_playing_message(next_song, sender, prefix="🎵 自动播放")
-                            
-                            # 播放后等待5秒，让播放器完全启动
-                            time.sleep(5)
-                        else:
-                            logger.warning("自动播放: 获取下一首失败")
-                    # else:
-                    #     # 队列为空，保留当前歌曲信息（不清空）
-                    #     logger.info(f"自动播放: 队列已空，保持当前歌曲显示 - {current.get('name')}")
-                # 如果没有当前歌曲但队列有歌，自动播放
-                elif queue_length > 0:
-                    logger.info(f"自动播放: 检测到队列有 {queue_length} 首歌，但没有当前播放，开始播放")
+
+                # 如果队列有歌曲，播放下一首（不管有没有当前歌曲）
+                if queue_length > 0:
                     next_song = queue_manager.play_next()
                     if next_song:
-                        print(f"[自动播放] 开始播放: {next_song.get('name')}")
+                        logger.info(f"自动播放: 开始播放 - {next_song.get('name')}")
                         
                         # 生成播放UUID并保存
                         import uuid
@@ -796,6 +758,8 @@ def auto_play_next_monitor():
                         
                         # 播放后等待5秒，让播放器完全启动
                         time.sleep(5)
+                    else:
+                        logger.warning("自动播放: 获取下一首失败")
             
             # 每 5 秒检查一次（增加间隔，减少频繁检查）
             time.sleep(10)

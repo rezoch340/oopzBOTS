@@ -233,10 +233,10 @@ async def bvid_to_mp3(bvid: str, bitrate: str = "192k"):
 def get_audio_player_status():
     """获取 AudioService 播放器状态（优先从 Redis 读取）"""
     # 先尝试从 Redis 缓存读取
-    cached_status = queue_manager.get_player_status()
+    cached_status = queue_manager.player_status_from_service()
     if cached_status:
         return cached_status
-    
+
     # 缓存不存在或过期，从 AudioService 获取并更新到 Redis
     return queue_manager.update_player_status_from_service(AUDIOSERVICE_URL)
 

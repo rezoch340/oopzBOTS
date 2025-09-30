@@ -6,8 +6,9 @@ Redis 队列管理器
 """
 
 import json
+import threading
 import time
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 from redis import Redis
 
 
@@ -72,19 +73,46 @@ class QueueManager:
         if current_json:
             return json.loads(current_json)
         return None
-    
+
+    def player_status_from_service(self) -> dict | None:
+        """获取当前播放状态"""
+        current_json = self.redis.get(self.player_status_key)
+        if current_json:
+            return json.loads(current_json)
+        return None
+
     def set_current(self, song_data: Optional[Dict]):
         """设置当前播放的歌曲"""
-        if song_data:
-            # 如果有频道信息，缓存为默认频道（24小时过期）
-            if song_data.get('channel'):
-                self.redis.set(self.default_channel_key, song_data['channel'], ex=86400)
-            
-            self.redis.set(self.current_key, json.dumps(song_data, ensure_ascii=False))
-            print(f"[QueueManager] 设置当前播放: {song_data.get('name')}, 频道: {song_data.get('channel')}")
-        else:
-            self.redis.delete(self.current_key)
-            print(f"[QueueManager] 清空当前播放")
+
+        def write_to_redis(song_data: Dict):
+            # 延时，避免和 C# Stop 状态清理打架
+            time.sleep(4)
+
+            if song_data:
+                if song_data.get('channel'):
+                    self.redis.set(self.default_channel_key, song_data['channel'], ex=86400)
+
+                song_json = json.dumps(song_data, ensure_ascii=False)
+                c = self.redis.set(self.current_key, song_json)
+
+                if not c:
+                    print(f"[ERROR] Redis set 失败!")
+                else:
+                    verify = self.redis.get(self.current_key)
+                    if not verify:
+                        print(f"[ERROR] Redis 写入后立即验证为空!")
+                        print(f"[DEBUG] 尝试写入的数据长度: {len(song_json)}")
+                        print(f"[DEBUG] Redis 键: {self.current_key}")
+
+                print(c)
+                print(f"[QueueManager] 设置当前播放: {song_data.get('name')}, 频道: {song_data.get('channel')}")
+            else:
+                self.redis.delete(self.current_key)
+                print(f"[QueueManager] 清空当前播放")
+
+        # 开一个后台线程去写 redis，不阻塞主逻辑
+        t = threading.Thread(target=write_to_redis, args=(song_data,), daemon=True)
+        t.start()
     
     def get_next(self) -> Optional[Dict]:
         """获取并移除队列中的下一首歌"""
@@ -192,12 +220,10 @@ class QueueManager:
         # 获取下一首
         next_song = self.get_next()
         if next_song:
-            self.set_current(next_song)
             return next_song
         else:
             # 队列为空
             if clear_on_empty:
-                self.set_current(None)
                 print("[QueueManager] 队列为空，已清空当前播放")
             else:
                 print(f"[QueueManager] 队列为空，保留当前播放显示: {current.get('name') if current else 'None'}")
@@ -210,30 +236,7 @@ class QueueManager:
     def get_default_channel(self) -> Optional[str]:
         """获取默认频道"""
         return self.redis.get(self.default_channel_key)
-    
-    def set_player_status(self, status: Dict):
-        """缓存播放器状态到 Redis
-        
-        Args:
-            status: 播放器状态字典，包含 playing、currentFile、playbackState 等
-        """
-        self.redis.set(
-            self.player_status_key,
-            json.dumps(status, ensure_ascii=False),
-            ex=10  # 10 秒过期，确保状态及时更新
-        )
-    
-    def get_player_status(self) -> Optional[Dict]:
-        """从 Redis 获取缓存的播放器状态
-        
-        Returns:
-            播放器状态字典，如果缓存不存在返回 None
-        """
-        status_json = self.redis.get(self.player_status_key)
-        if status_json:
-            return json.loads(status_json)
-        return None
-    
+
     def update_player_status_from_service(self, audioservice_url: str) -> Dict:
         """从 AudioService 更新播放器状态到 Redis
         
@@ -245,18 +248,13 @@ class QueueManager:
         """
         try:
             import requests
-            response = requests.get(f"{audioservice_url}/status", timeout=2)
-            if response.status_code == 200:
+            player_status_from_service = self.player_status_from_service()
+            if player_status_from_service:
+                return player_status_from_service
+            else:
+                response = requests.get(f"{audioservice_url}/stop", timeout=2)
                 status = response.json()
-                # 缓存到 Redis
-                self.set_player_status({
-                    "playing": status.get("playing", False),
-                    "currentFile": status.get("currentFile"),
-                    "playbackState": status.get("playbackState", "Unknown"),
-                    "timestamp": int(time.time())
-                })
                 return status
-            return {"playing": False, "error": f"状态码: {response.status_code}"}
         except Exception as e:
             return {"playing": False, "error": str(e)}
 
