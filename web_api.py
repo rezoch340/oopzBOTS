@@ -9,7 +9,12 @@ import json
 import hashlib
 import time
 import subprocess
+import psutil
+import os
+import threading
+import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 import requests
@@ -41,6 +46,32 @@ AUDIOSERVICE_URL = AudioService["base_url"]
 redis_client: Optional[Redis] = None
 queue_manager: Optional[QueueManager] = None
 sender = oopz_sender.SimpleOopzSender()  # Oopz 消息发送器
+
+# 系统监控 - 记录启动时间
+app_start_time = datetime.now()
+process = psutil.Process()
+
+# 网络流量监控 - 记录上次数据用于计算速度，使用锁保证线程安全
+last_network_data = {"timestamp": datetime.now(), "bytes_sent": 0, "bytes_recv": 0}
+network_data_lock = threading.Lock()
+
+# 系统监控缓存
+system_info_cache = {"data": None, "timestamp": None, "lock": threading.Lock()}
+CACHE_DURATION = 2  # 缓存2秒
+
+# CPU监控预热任务
+def cpu_warmup_task():
+    """定期调用CPU监控以获得准确的使用率数据"""
+    while True:
+        try:
+            psutil.cpu_percent(interval=1)  # 1秒间隔，保持数据新鲜
+            time.sleep(5)  # 每5秒执行一次
+        except Exception:
+            time.sleep(10)  # 出错时延长等待
+
+# 启动CPU预热线程
+cpu_warmup_thread = threading.Thread(target=cpu_warmup_task, daemon=True)
+cpu_warmup_thread.start()
 
 
 def _detail_key(bvid: str) -> str:
@@ -119,6 +150,18 @@ async def lifespan(app: FastAPI):
     
     # 初始化队列管理器（使用配置）
     queue_manager = QueueManager(redis_config=REDIS_CONFIG)
+    
+    # 初始化系统监控 - 预热网络数据
+    try:
+        net_io = psutil.net_io_counters()
+        global last_network_data
+        last_network_data.update({
+            "timestamp": datetime.now(),
+            "bytes_sent": net_io.bytes_sent,
+            "bytes_recv": net_io.bytes_recv
+        })
+    except Exception as e:
+        print(f"系统监控初始化警告: {e}")
     
     print("Web API 启动完成")
     
@@ -460,17 +503,281 @@ def get_recent_statistics(days: int = Query(7, ge=1, le=30)):
 @app.get("/api/statistics/summary")
 @require_auth
 async def get_summary_statistics(request: Request):
-    """获取汇总统计"""
+    """获取汇总统计（包含系统监控信息）"""
     today = Statistics.get_today()
     image_stats = ImageCache.get_stats()
     queue_length = queue_manager.get_queue_length()
+    system_info = get_cached_system_info()  # 获取缓存的系统信息
     
     return {
         "today": today,
         "queue_length": queue_length,
         "image_cache": image_stats,
-        "current_playing": queue_manager.get_current()
+        "current_playing": queue_manager.get_current(),
+        "system": system_info  # 添加系统监控信息
     }
+
+
+def get_china_time() -> str:
+    """获取中国时区的当前时间字符串 (UTC+8)"""
+    china_tz = timezone(timedelta(hours=8))
+    return datetime.now(china_tz).strftime('%Y-%m-%d %H:%M:%S')
+
+
+def format_bytes(bytes_value: int) -> str:
+    """格式化字节数为可读格式"""
+    if bytes_value == 0:
+        return "0 B"
+    
+    units = ['B', 'KB', 'MB', 'GB', 'TB']
+    i = 0
+    while bytes_value >= 1024 and i < len(units) - 1:
+        bytes_value /= 1024.0
+        i += 1
+    
+    return f"{bytes_value:.1f} {units[i]}"
+
+
+def format_duration(seconds: float) -> str:
+    """格式化秒数为可读的时长格式"""
+    if seconds < 60:
+        return f"{int(seconds)}秒"
+    elif seconds < 3600:
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}分{secs}秒"
+    elif seconds < 86400:
+        hours = int(seconds // 3600)
+        minutes = int((seconds % 3600) // 60)
+        return f"{hours}小时{minutes}分"
+    else:
+        days = int(seconds // 86400)
+        hours = int((seconds % 86400) // 3600)
+        return f"{days}天{hours}小时"
+
+
+def get_cached_system_info() -> dict:
+    """获取缓存的系统监控信息"""
+    global system_info_cache
+    
+    with system_info_cache["lock"]:
+        now = datetime.now()
+        
+        # 检查缓存是否有效
+        if (system_info_cache["data"] is not None and 
+            system_info_cache["timestamp"] is not None and 
+            (now - system_info_cache["timestamp"]).total_seconds() < CACHE_DURATION):
+            return system_info_cache["data"]
+        
+        # 缓存过期或不存在，重新获取
+        try:
+            # 运行时长
+            uptime_seconds = (now - app_start_time).total_seconds()
+            
+            # CPU信息 - 非阻塞
+            cpu_percent = psutil.cpu_percent(interval=0)
+            cpu_count = psutil.cpu_count()
+            
+            # 内存信息
+            memory = psutil.virtual_memory()
+            
+            # 网络信息（简化版）
+            net_io = psutil.net_io_counters()
+            
+            # 计算网络速度
+            global last_network_data
+            with network_data_lock:
+                time_diff = (now - last_network_data["timestamp"]).total_seconds()
+                
+                if time_diff > 0 and last_network_data["bytes_sent"] > 0:
+                    bytes_sent_per_sec = max(0, (net_io.bytes_sent - last_network_data["bytes_sent"]) / time_diff)
+                    bytes_recv_per_sec = max(0, (net_io.bytes_recv - last_network_data["bytes_recv"]) / time_diff)
+                else:
+                    bytes_sent_per_sec = 0
+                    bytes_recv_per_sec = 0
+                
+                # 更新上次数据
+                last_network_data = {
+                    "timestamp": now,
+                    "bytes_sent": net_io.bytes_sent,
+                    "bytes_recv": net_io.bytes_recv
+                }
+            
+            # 进程信息 - 带错误处理
+            global process
+            try:
+                process_memory = process.memory_info()
+                process_cpu = process.cpu_percent()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # 如果进程出错，重新获取
+                try:
+                    process = psutil.Process()
+                    process_memory = process.memory_info()
+                    process_cpu = process.cpu_percent()
+                except Exception:
+                    # 如果还是出错，使用默认值
+                    process_memory = type('obj', (object,), {'rss': 0, 'vms': 0})
+                    process_cpu = 0.0
+            
+            # 构建返回数据
+            data = {
+                "timestamp": get_china_time(),
+                "uptime_formatted": format_duration(uptime_seconds),
+                "cpu_usage": round(cpu_percent, 1),
+                "cpu_count": cpu_count,
+                "memory_usage": round(memory.percent, 1),
+                "memory_used_formatted": format_bytes(memory.used),
+                "memory_total_formatted": format_bytes(memory.total),
+                "network_speed_up": format_bytes(bytes_sent_per_sec) + "/s",
+                "network_speed_down": format_bytes(bytes_recv_per_sec) + "/s",
+                "process_memory_formatted": format_bytes(process_memory.rss),
+                "process_cpu": round(process_cpu, 1)
+            }
+            
+            # 更新缓存
+            system_info_cache["data"] = data
+            system_info_cache["timestamp"] = now
+            
+            return data
+            
+        except Exception as e:
+            # 如果获取失败，返回错误信息
+            error_data = {
+                "error": str(e),
+                "timestamp": get_china_time()
+            }
+            return error_data
+
+
+# ========= 系统监控 API =========
+@app.get("/api/system/info")
+@require_auth
+async def get_system_info(request: Request):
+    """获取系统监控信息"""
+    try:
+        # 运行时长
+        uptime_seconds = (datetime.now() - app_start_time).total_seconds()
+        
+        # CPU 信息 - 非阻塞获取（使用上次调用的结果）
+        cpu_percent = psutil.cpu_percent(interval=0)
+        cpu_count = psutil.cpu_count()
+        cpu_freq = psutil.cpu_freq()
+        
+        # 内存信息 - 实时
+        memory = psutil.virtual_memory()
+        
+        # 磁盘信息 - 实时
+        disk = psutil.disk_usage('.')
+        
+        # 网络信息 - 计算实时速度
+        net_io = psutil.net_io_counters()
+        current_time = datetime.now()
+        
+        # 计算网络速度（线程安全）
+        global last_network_data
+        with network_data_lock:
+            time_diff = (current_time - last_network_data["timestamp"]).total_seconds()
+            
+            if time_diff > 0 and last_network_data["bytes_sent"] > 0:
+                bytes_sent_per_sec = max(0, (net_io.bytes_sent - last_network_data["bytes_sent"]) / time_diff)
+                bytes_recv_per_sec = max(0, (net_io.bytes_recv - last_network_data["bytes_recv"]) / time_diff)
+            else:
+                bytes_sent_per_sec = 0
+                bytes_recv_per_sec = 0
+            
+            # 更新上次数据
+            last_network_data = {
+                "timestamp": current_time,
+                "bytes_sent": net_io.bytes_sent,
+                "bytes_recv": net_io.bytes_recv
+            }
+        
+        # 进程信息 - 实时获取当前进程资源使用
+        global process
+        try:
+            process_memory = process.memory_info()
+            process_cpu = process.cpu_percent()
+        except psutil.NoSuchProcess:
+            # 如果进程不存在，重新获取当前进程
+            process = psutil.Process()
+            process_memory = process.memory_info()
+            process_cpu = process.cpu_percent()
+        
+        return {
+            "timestamp": get_china_time(),
+            "uptime": {
+                "seconds": int(uptime_seconds),
+                "formatted": format_duration(uptime_seconds)
+            },
+            "cpu": {
+                "usage_percent": round(cpu_percent, 1),
+                "count": cpu_count,
+                "frequency_mhz": round(cpu_freq.current, 1) if cpu_freq else None
+            },
+            "memory": {
+                "total": memory.total,
+                "available": memory.available,
+                "used": memory.used,
+                "usage_percent": round(memory.percent, 1),
+                "total_formatted": format_bytes(memory.total),
+                "available_formatted": format_bytes(memory.available),
+                "used_formatted": format_bytes(memory.used)
+            },
+            "disk": {
+                "total": disk.total,
+                "used": disk.used,
+                "free": disk.free,
+                "usage_percent": round((disk.used / disk.total) * 100, 1),
+                "total_formatted": format_bytes(disk.total),
+                "used_formatted": format_bytes(disk.used),
+                "free_formatted": format_bytes(disk.free)
+            },
+            "network": {
+                "bytes_sent": net_io.bytes_sent,
+                "bytes_recv": net_io.bytes_recv,
+                "packets_sent": net_io.packets_sent,
+                "packets_recv": net_io.packets_recv,
+                "bytes_sent_formatted": format_bytes(net_io.bytes_sent),
+                "bytes_recv_formatted": format_bytes(net_io.bytes_recv),
+                "speed_sent_per_sec": bytes_sent_per_sec,
+                "speed_recv_per_sec": bytes_recv_per_sec,
+                "speed_sent_formatted": format_bytes(bytes_sent_per_sec) + "/s",
+                "speed_recv_formatted": format_bytes(bytes_recv_per_sec) + "/s"
+            },
+            "process": {
+                "memory_rss": process_memory.rss,
+                "memory_vms": process_memory.vms,
+                "cpu_percent": round(process_cpu, 1),
+                "memory_rss_formatted": format_bytes(process_memory.rss),
+                "memory_vms_formatted": format_bytes(process_memory.vms)
+            }
+        }
+    except Exception as e:
+        return {"error": str(e), "timestamp": get_china_time()}
+
+
+@app.get("/api/system/stats")  
+@require_auth
+async def get_system_stats(request: Request):
+    """获取简化的系统统计信息"""
+    try:
+        # 运行时长
+        uptime_seconds = (datetime.now() - app_start_time).total_seconds()
+        
+        # 快速获取实时关键指标
+        cpu_percent = psutil.cpu_percent(interval=0.1)  # 快速获取实时CPU
+        memory = psutil.virtual_memory()
+        
+        return {
+            "uptime": format_duration(uptime_seconds),
+            "cpu_usage": f"{cpu_percent}%",
+            "memory_usage": f"{memory.percent}%",
+            "memory_used": format_bytes(memory.used),
+            "memory_total": format_bytes(memory.total),
+            "timestamp": get_china_time()
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ========= 日志相关 API =========
@@ -768,6 +1075,405 @@ async def login_page():
     """
 
 
+@app.get("/system", response_class=HTMLResponse)
+async def system_monitoring():
+    """系统监控页面"""
+    return HTMLResponse(content="""
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🖥️ 系统监控 - Oopz Music Bot</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+        .container { 
+            max-width: 1200px; 
+            margin: 0 auto; 
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        .header h1 { 
+            font-size: 2.5rem; 
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        .last-update {
+            background: rgba(255,255,255,0.2);
+            padding: 5px 15px;
+            border-radius: 20px;
+            display: inline-block;
+            font-size: 0.9rem;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        .card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+        }
+        .card-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .card-title .icon { font-size: 1.5rem; }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding: 10px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .metric:last-child { 
+            border-bottom: none; 
+            margin-bottom: 0;
+        }
+        .metric-label {
+            font-weight: 500;
+            color: #666;
+        }
+        .metric-value {
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: #333;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 5px;
+            position: relative;
+        }
+        .progress-fill {
+            height: 100%;
+            border-radius: 10px;
+            transition: width 0.5s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .progress-cpu { background: linear-gradient(45deg, #4facfe 0%, #00f2fe 100%); }
+        .progress-memory { background: linear-gradient(45deg, #43e97b 0%, #38f9d7 100%); }
+        .progress-disk { background: linear-gradient(45deg, #fa709a 0%, #fee140 100%); }
+        .status-good { color: #28a745; }
+        .status-warning { color: #ffc107; }
+        .status-danger { color: #dc3545; }
+        .loading {
+            text-align: center;
+            color: #666;
+            padding: 40px;
+            font-size: 1.1rem;
+        }
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border: 1px solid #f5c6cb;
+        }
+        .nav-btn {
+            position: fixed;
+            top: 20px;
+            background: rgba(255,255,255,0.2);
+            border: 2px solid white;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            text-decoration: none;
+            display: inline-block;
+        }
+        .nav-btn:hover {
+            background: white;
+            color: #667eea;
+        }
+        .refresh-btn { right: 20px; }
+        .back-btn { left: 20px; }
+        .auto-refresh {
+            text-align: center;
+            color: white;
+            margin-top: 20px;
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+        @media (max-width: 768px) {
+            .container { padding: 10px; }
+            .header h1 { font-size: 2rem; }
+            .grid { grid-template-columns: 1fr; }
+            .nav-btn { 
+                position: static; 
+                margin: 10px;
+                display: inline-block;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="/" class="nav-btn back-btn">🏠 返回</a>
+        <button class="nav-btn refresh-btn" onclick="loadSystemInfo()">🔄 刷新</button>
+        
+        <div class="header">
+            <h1>🖥️ 系统监控</h1>
+            <div class="last-update">最后更新: <span id="lastUpdate">--</span></div>
+        </div>
+        
+        <div id="content">
+            <div class="loading">📊 正在加载实时系统监控数据...</div>
+        </div>
+        
+        <div class="auto-refresh">
+            ⏱️ 每5秒自动更新，显示实时占用情况
+        </div>
+    </div>
+
+    <script>
+        let authToken = localStorage.getItem('authToken');
+        let updateInterval;
+
+        function getStatusClass(percent) {
+            if (percent < 50) return 'status-good';
+            if (percent < 80) return 'status-warning';
+            return 'status-danger';
+        }
+
+        async function loadSystemInfo() {
+            try {
+                const response = await fetch('/api/system/info', {
+                    headers: authToken ? { 'Authorization': `Bearer ${authToken}` } : {}
+                });
+                
+                if (response.status === 401) {
+                    document.getElementById('content').innerHTML = `
+                        <div class="error">
+                            🔐 需要登录才能查看系统监控信息
+                            <br><br>
+                            <a href="/login" style="color: #721c24; font-weight: bold;">前往登录</a>
+                        </div>
+                    `;
+                    return;
+                }
+
+                const data = await response.json();
+                
+                if (data.error) {
+                    document.getElementById('content').innerHTML = `
+                        <div class="error">❌ 获取系统信息失败: ${data.error}</div>
+                    `;
+                    return;
+                }
+
+                document.getElementById('lastUpdate').textContent = data.timestamp;
+                
+                document.getElementById('content').innerHTML = `
+                    <div class="grid">
+                        <!-- CPU卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">🖥️</span>
+                                CPU 实时监控
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">实时使用率</span>
+                                <span class="metric-value ${getStatusClass(data.cpu.usage_percent)}">${data.cpu.usage_percent}%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill progress-cpu" style="width: ${data.cpu.usage_percent}%"></div>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">核心数</span>
+                                <span class="metric-value">${data.cpu.count} 核</span>
+                            </div>
+                            ${data.cpu.frequency_mhz ? `
+                            <div class="metric">
+                                <span class="metric-label">频率</span>
+                                <span class="metric-value">${data.cpu.frequency_mhz} MHz</span>
+                            </div>
+                            ` : ''}
+                        </div>
+
+                        <!-- 内存卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">🧠</span>
+                                内存实时监控
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">实时使用率</span>
+                                <span class="metric-value ${getStatusClass(data.memory.usage_percent)}">${data.memory.usage_percent}%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill progress-memory" style="width: ${data.memory.usage_percent}%"></div>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">已使用</span>
+                                <span class="metric-value">${data.memory.used_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">可用</span>
+                                <span class="metric-value">${data.memory.available_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">总内存</span>
+                                <span class="metric-value">${data.memory.total_formatted}</span>
+                            </div>
+                        </div>
+
+                        <!-- 磁盘卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">💾</span>
+                                磁盘使用情况
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">使用率</span>
+                                <span class="metric-value ${getStatusClass(data.disk.usage_percent)}">${data.disk.usage_percent}%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div class="progress-fill progress-disk" style="width: ${data.disk.usage_percent}%"></div>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">已使用</span>
+                                <span class="metric-value">${data.disk.used_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">可用空间</span>
+                                <span class="metric-value">${data.disk.free_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">总容量</span>
+                                <span class="metric-value">${data.disk.total_formatted}</span>
+                            </div>
+                        </div>
+
+                        <!-- 网络卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">🌐</span>
+                                网络流量统计
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">发送流量</span>
+                                <span class="metric-value">${data.network.bytes_sent_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">接收流量</span>
+                                <span class="metric-value">${data.network.bytes_recv_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">发送包数</span>
+                                <span class="metric-value">${data.network.packets_sent.toLocaleString()}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">接收包数</span>
+                                <span class="metric-value">${data.network.packets_recv.toLocaleString()}</span>
+                            </div>
+                        </div>
+
+                        <!-- 进程信息卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">⚙️</span>
+                                Bot进程实时监控
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">CPU使用率</span>
+                                <span class="metric-value ${getStatusClass(data.process.cpu_percent)}">${data.process.cpu_percent}%</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">物理内存</span>
+                                <span class="metric-value">${data.process.memory_rss_formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">虚拟内存</span>
+                                <span class="metric-value">${data.process.memory_vms_formatted}</span>
+                            </div>
+                        </div>
+
+                        <!-- 系统信息卡片 -->
+                        <div class="card">
+                            <div class="card-title">
+                                <span class="icon">📊</span>
+                                运行状态
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">运行时长</span>
+                                <span class="metric-value">${data.uptime.formatted}</span>
+                            </div>
+                            <div class="metric">
+                                <span class="metric-label">更新时间</span>
+                                <span class="metric-value">${data.timestamp}</span>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error('加载系统信息失败:', error);
+                document.getElementById('content').innerHTML = `
+                    <div class="error">❌ 连接失败: ${error.message}</div>
+                `;
+            }
+        }
+
+        // 页面加载时获取认证信息
+        window.addEventListener('load', () => {
+            // 尝试从URL参数获取token
+            const urlParams = new URLSearchParams(window.location.search);
+            const tokenFromUrl = urlParams.get('token');
+            if (tokenFromUrl) {
+                authToken = tokenFromUrl;
+                localStorage.setItem('authToken', authToken);
+            }
+
+            // 初始加载
+            loadSystemInfo();
+            
+            // 设置定时更新 - 每5秒更新一次确保实时性
+            updateInterval = setInterval(loadSystemInfo, 5000);
+        });
+
+        // 页面离开时清理定时器
+        window.addEventListener('beforeunload', () => {
+            if (updateInterval) {
+                clearInterval(updateInterval);
+            }
+        });
+    </script>
+</body>
+</html>
+""")
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """简单的仪表盘"""
@@ -992,11 +1698,34 @@ async def dashboard(request: Request):
                     <div class="stat-value" id="cacheUses">-</div>
                     <div class="stat-label">节省上传次数</div>
                 </div>
+                <div class="stat-card">
+                    <h3>🖥️ CPU使用率</h3>
+                    <div class="stat-value" id="cpuUsage">-</div>
+                    <div class="stat-label">实时监控</div>
+                </div>
+                <div class="stat-card">
+                    <h3>🧠 内存使用</h3>
+                    <div class="stat-value" id="memoryUsage">-</div>
+                    <div class="stat-label">实时监控</div>
+                </div>
+                <div class="stat-card">
+                    <h3>📡 网络速度</h3>
+                    <div class="stat-value" id="networkSpeed">-</div>
+                    <div class="stat-label">实时上传/下载</div>
+                </div>
             </div>
 
             <div class="current-song">
                 <h2>🎶 当前播放</h2>
                 <div id="currentSong" class="loading">加载中...</div>
+            </div>
+
+            <div class="panel">
+                <h2>🖥️ 系统详情</h2>
+                <div id="systemDetails" class="loading">加载中...</div>
+                <div class="api-links" style="margin-top: 20px;">
+                    <a href="/system" target="_blank">📊 详细监控</a>
+                </div>
             </div>
 
             <div class="panel">
@@ -1052,6 +1781,18 @@ async def dashboard(request: Request):
                     const total = hits + misses;
                     const hitRate = total > 0 ? ((hits / total) * 100).toFixed(1) + '%' : '0%';
                     document.getElementById('cacheHitRate').textContent = hitRate;
+                    
+                    // 更新系统监控信息
+                    const system = data.system;
+                    if (system && !system.error) {
+                        document.getElementById('cpuUsage').textContent = system.cpu_usage + '%';
+                        document.getElementById('memoryUsage').textContent = system.memory_usage + '%';
+                        document.getElementById('networkSpeed').textContent = `↑${system.network_speed_up} ↓${system.network_speed_down}`;
+                    } else {
+                        document.getElementById('cpuUsage').textContent = '-';
+                        document.getElementById('memoryUsage').textContent = '-';
+                        document.getElementById('networkSpeed').textContent = '-';
+                    }
                     
                     const current = data.current_playing;
                     const currentDiv = document.getElementById('currentSong');
@@ -1157,6 +1898,67 @@ async def dashboard(request: Request):
                     loadSummary();
                 } catch (e) {
                     alert('操作失败: ' + e.message);
+                }
+            }
+
+            async function loadSystemDetails() {
+                try {
+                    const res = await fetch('/api/statistics/summary');
+                    const data = await res.json();
+                    
+                    const system = data.system;
+                    const systemDiv = document.getElementById('systemDetails');
+                    
+                    if (system && !system.error) {
+                        systemDiv.innerHTML = `
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">🖥️ CPU</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; margin: 10px 0; color: ${system.cpu_usage > 80 ? '#dc3545' : system.cpu_usage > 50 ? '#ffc107' : '#28a745'}">${system.cpu_usage}%</div>
+                                    <div style="font-size: 0.9em; color: #666;">${system.cpu_count} 核心</div>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">🧠 内存</div>
+                                    <div style="font-size: 1.8em; font-weight: bold; margin: 10px 0; color: ${system.memory_usage > 80 ? '#dc3545' : system.memory_usage > 70 ? '#ffc107' : '#28a745'}">${system.memory_usage}%</div>
+                                    <div style="font-size: 0.9em; color: #666;">${system.memory_used_formatted} / ${system.memory_total_formatted}</div>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">🌐 网络</div>
+                                    <div style="font-size: 1.3em; font-weight: bold; margin: 10px 0; color: #667eea;">
+                                        ↑${system.network_speed_up}<br>
+                                        ↓${system.network_speed_down}
+                                    </div>
+                                    <div style="font-size: 0.9em; color: #666;">实时速度</div>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">⚙️ Bot进程</div>
+                                    <div style="font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #667eea;">${system.process_cpu}%</div>
+                                    <div style="font-size: 0.9em; color: #666;">${system.process_memory_formatted}</div>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">⏱️ 运行时长</div>
+                                    <div style="font-size: 1.5em; font-weight: bold; margin: 10px 0; color: #667eea;">${system.uptime_formatted}</div>
+                                    <div style="font-size: 0.9em; color: #666;">持续在线</div>
+                                </div>
+                                <div style="background: #f8f9fa; padding: 15px; border-radius: 10px; text-align: center;">
+                                    <div style="font-size: 1.2em; font-weight: bold; color: #667eea;">🕐 更新时间</div>
+                                    <div style="font-size: 1.2em; font-weight: bold; margin: 10px 0; color: #667eea;">${system.timestamp}</div>
+                                    <div style="font-size: 0.9em; color: #666;">实时数据</div>
+                                </div>
+                            </div>
+                        `;
+                    } else {
+                        systemDiv.innerHTML = `
+                            <div class="error">
+                                ❌ 获取系统信息失败: ${system ? system.error : '未知错误'}
+                            </div>
+                        `;
+                    }
+                } catch (e) {
+                    console.error('加载系统详情失败:', e);
+                    document.getElementById('systemDetails').innerHTML = `
+                        <div class="error">❌ 连接失败: ${e.message}</div>
+                    `;
                 }
             }
 
@@ -1286,12 +2088,14 @@ async def dashboard(request: Request):
             // 初始加载
             loadSummary();
             loadQueue();
+            loadSystemDetails(); // 加载系统详情
             startLogStream(); // 启动日志流
 
             // 自动刷新统计和队列
             setInterval(() => {
                 loadSummary();
                 loadQueue();
+                loadSystemDetails(); // 刷新系统详情
             }, 10000); // 每 10 秒刷新
             
             // 页面关闭时断开日志流
