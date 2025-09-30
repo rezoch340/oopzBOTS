@@ -21,6 +21,10 @@ from cryptography.hazmat.backends import default_backend
 
 # 导入配置
 from config import OOPZ_CONFIG, DEFAULT_HEADERS
+from logger_config import get_logger
+
+# 创建 logger
+logger = get_logger("OopzSender")
 
 
 def get_image_info(file_path: str):
@@ -60,7 +64,7 @@ class SimpleSigner:
             from private_key import get_private_key
             return get_private_key()
         except ImportError:
-            print("⚠️  private_key.py文件不存在，使用测试私钥")
+            logger.warning("⚠️ private_key.py文件不存在，使用测试私钥")
             return rsa.generate_private_key(
                 public_exponent=65537,
                 key_size=2048,
@@ -135,10 +139,10 @@ class SimpleOopzSender:
         # 设置固定的HTTP请求头
         self.session.headers.update(DEFAULT_HEADERS)
 
-        print("✅ Oopz消息发送器已初始化")
-        print(f"👤 用户: {OOPZ_CONFIG['person_uid']}")
-        print(f"📱 设备: {OOPZ_CONFIG['device_id']}")
-        print(f"🌐 渠道: {OOPZ_CONFIG['channel']}")
+        logger.info("✅ Oopz消息发送器已初始化")
+        logger.info(f"👤 用户: {OOPZ_CONFIG['person_uid']}")
+        logger.info(f"📱 设备: {OOPZ_CONFIG['device_id']}")
+        logger.info(f"🌐 渠道: {OOPZ_CONFIG['channel']}")
 
     def send_message(self,
                      text: str,
@@ -197,23 +201,23 @@ class SimpleOopzSender:
         # 构建完整URL
         url = OOPZ_CONFIG["base_url"] + url_path
 
-        print(f"📤 发送消息: {text}")
-        print(f"🆔 消息ID: {client_message_id}")
-        print(f"📍 区域: {area}, 频道: {channel}")
+        logger.info(f"📤 发送消息: {text[:50]}{'...' if len(text) > 50 else ''}")
+        logger.debug(f"🆔 消息ID: {client_message_id}")
+        logger.debug(f"📍 区域: {area}, 频道: {channel}")
 
         # 发送HTTP请求
         try:
             # 🔧 修复编码问题：确保请求体使用 UTF-8 编码
             response = self.session.post(url, headers=headers, data=body_str.encode('utf-8'))
 
-            print(f"📥 响应状态: {response.status_code}")
+            logger.info(f"📥 响应状态: {response.status_code}")
             if response.text:
-                print(f"📄 响应内容: {response.text}\n")
+                logger.debug(f"📄 响应内容: {response.text}")
 
             return response
 
         except Exception as e:
-            print(f"❌ 发送失败: {e}\n")
+            logger.error(f"❌ 发送失败: {e}")
             raise
 
     def send_to_default(self, text: str) -> requests.Response:
@@ -245,7 +249,7 @@ class SimpleOopzSender:
             raise Exception(f"获取上传URL失败: {resp.text}")
 
         resp_json = resp.json()
-        print(resp_json)
+        logger.debug(f"上传URL响应: {resp_json}")
         upload_url = resp_json["data"]["uploadUrl"]
         file_key = resp_json["data"]["fileKey"]
 
@@ -259,11 +263,11 @@ class SimpleOopzSender:
 
     def send_multiple(self, messages: list, interval: float = 1.0):
         """批量发送消息"""
-        print(f"📦 准备发送 {len(messages)} 条消息...")
+        logger.info(f"📦 准备发送 {len(messages)} 条消息...")
 
         results = []
         for i, message in enumerate(messages, 1):
-            print(f"\n[{i}/{len(messages)}] 发送中...")
+            logger.info(f"[{i}/{len(messages)}] 发送中...")
 
             try:
                 response = self.send_to_default(message)
@@ -274,11 +278,11 @@ class SimpleOopzSender:
                 })
 
                 if i < len(messages):  # 不是最后一条消息
-                    print(f"⏳ 等待 {interval} 秒...")
+                    logger.debug(f"⏳ 等待 {interval} 秒...")
                     time.sleep(interval)
 
             except Exception as e:
-                print(f"💥 发送失败: {e}")
+                logger.error(f"💥 发送失败: {e}")
                 results.append({
                     'message': message,
                     'status_code': None,
@@ -288,7 +292,7 @@ class SimpleOopzSender:
 
         # 统计结果
         success_count = sum(1 for r in results if r['success'])
-        print(f"\n📊 发送完成: {success_count}/{len(messages)} 成功")
+        logger.info(f"📊 发送完成: {success_count}/{len(messages)} 成功")
 
         return results
 
@@ -402,26 +406,26 @@ class SimpleOopzSender:
 
 def demo():
     """演示简化版发送器"""
-    print("=== 简化版Oopz消息发送器演示 ===\n")
+    logger.info("=== 简化版Oopz消息发送器演示 ===")
 
     # 创建发送器（无需任何参数）
     sender = SimpleOopzSender()
 
-    print("\n" + "=" * 50)
-    print("🎯 演示功能:")
+    logger.info("=" * 50)
+    logger.info("🎯 演示功能:")
 
     # 1. 发送单条消息
-    print("\n1. 发送单条消息到默认频道:")
+    logger.info("1. 发送单条消息到默认频道:")
     try:
         response = sender.send_to_default("Hello from Simple Sender! 🚀")
         if response.status_code == 200:
-            print("✅ 发送成功!")
+            logger.info("✅ 发送成功!")
         else:
-            print(f"⚠️ 发送状态: {response.status_code}")
+            logger.warning(f"⚠️ 发送状态: {response.status_code}")
     except Exception as e:
-        print(f"❌ 发送失败: {e}")
+        logger.error(f"❌ 发送失败: {e}")
 
-    print("\n2. 发送到指定频道:")
+    logger.info("2. 发送到指定频道:")
     try:
         response = sender.send_message(
             text="指定频道消息 📍",
@@ -429,9 +433,9 @@ def demo():
             channel="01K5SCK1NK1ZXZAQE957RME3P2"
         )
     except Exception as e:
-        print(f"❌ 发送失败: {e}")
+        logger.error(f"❌ 发送失败: {e}")
 
-    print("\n3. 批量发送演示:")
+    logger.info("3. 批量发送演示:")
     messages = [
         "批量消息 1 📝",
         "批量消息 2 🎯",
@@ -440,16 +444,16 @@ def demo():
 
     try:
         results = sender.send_multiple(messages, interval=0.5)
-        print("批量发送结果:", results)
+        logger.info(f"批量发送结果: {results}")
     except Exception as e:
-        print(f"❌ 批量发送失败: {e}")
+        logger.error(f"❌ 批量发送失败: {e}")
 
 
 def interactive_mode():
     """交互模式"""
-    print("💬 进入交互模式")
-    print("输入消息内容，输入 'quit' 退出")
-    print("=" * 50)
+    logger.info("💬 进入交互模式")
+    logger.info("输入消息内容，输入 'quit' 退出")
+    logger.info("=" * 50)
 
     sender = SimpleOopzSender()
 
@@ -458,35 +462,35 @@ def interactive_mode():
             message = input("\n💭 输入消息: ").strip()
 
             if message.lower() in ['quit', 'exit', '退出']:
-                print("👋 再见!")
+                logger.info("👋 再见!")
                 break
 
             if not message:
-                print("❌ 消息不能为空")
+                logger.warning("❌ 消息不能为空")
                 continue
 
             response = sender.send_to_default(message)
 
             if response.status_code == 200:
-                print("✅ 发送成功!")
+                logger.info("✅ 发送成功!")
             else:
-                print(f"⚠️ 发送状态: {response.status_code}")
+                logger.warning(f"⚠️ 发送状态: {response.status_code}")
 
         except KeyboardInterrupt:
-            print("\n\n👋 用户中断，再见!")
+            logger.info("\n👋 用户中断，再见!")
             break
         except Exception as e:
-            print(f"💥 发送异常: {e}")
+            logger.error(f"💥 发送异常: {e}")
 
 
 if __name__ == "__main__":
     sender = SimpleOopzSender()
     res = sender.upload_file_from_url("https://y.qq.com/music/photo_new/T002R300x300M000004IXV6J3kcvn1_2.jpg?max_age=2592000")
-    print(res)
-    # print("🎯 简化版Oopz消息发送器")
-    # print("选择模式:")
-    # print("1. 演示模式")
-    # print("2. 交互模式")
+    logger.info(f"测试结果: {res}")
+    # logger.info("🎯 简化版Oopz消息发送器")
+    # logger.info("选择模式:")
+    # logger.info("1. 演示模式")
+    # logger.info("2. 交互模式")
     #
     # try:
     #     choice = input("\n请选择 (1-2): ").strip()
@@ -496,8 +500,8 @@ if __name__ == "__main__":
     #     elif choice == "2":
     #         interactive_mode()
     #     else:
-    #         print("❌ 无效选择，运行演示模式")
+    #         logger.warning("❌ 无效选择，运行演示模式")
     #         demo()
     #
     # except KeyboardInterrupt:
-    #     print("\n👋 用户取消，再见!")
+    #     logger.info("\n👋 用户取消，再见!")

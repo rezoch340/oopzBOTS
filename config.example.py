@@ -39,6 +39,28 @@ OOPZ_CONFIG = {
     "default_channel": ""
 }
 
+
+
+# Web API 认证配置
+WEB_AUTH = {
+    "username": "admin",  # 修改为你的用户名
+    "password": "oopz2025",  # 修改为你的密码
+    "jwt_secret": "oopz_music_bot_secret_key_2025",  # 修改为随机生成的密钥
+    "jwt_algorithm": "HS256",
+    "token_expire_hours": 24
+}
+
+
+# Redis 配置
+REDIS_CONFIG = {
+    "host": "127.0.0.1",  # Redis 服务器地址
+    "port": 6379,  # Redis 端口
+    "password": "",  # Redis 密码（如果有）
+    "db": 0,
+    "decode_responses": True
+}
+
+
 # HTTP请求头模板（固定的浏览器请求头）
 DEFAULT_HEADERS = {
     'Accept': '*/*',
@@ -192,3 +214,5 @@ if __name__ == "__main__":
             print("配置更新失败")
     else:
         print("无法读取登录数据")
+
+

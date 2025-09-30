@@ -1,15 +1,62 @@
-# Python 缓存
+# Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
 
-# 虚拟环境
+# Virtual Environment
 venv/
-.env/
+env/
+ENV/
+.venv
 
-# IDE 配置
-.idea/
-.vscode/
+# Database
+*.db
+*.sqlite
+*.sqlite3
+oopz_cache.db
 
-# 本地私密配置（不要上传）
+# Config
 config.py
 private_key.py
+
+# Logs
+*.log
+logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+test.py
+test.webp
+test_*.py
+
+# Temporary
+*.tmp
+*.bak
+*.backup
