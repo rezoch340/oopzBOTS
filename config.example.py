@@ -5,6 +5,10 @@ Oopz配置文件
 包含所有固定的常量参数
 """
 
+import winreg
+import base64
+import json
+
 # 固定的请求头参数
 OOPZ_CONFIG = {
     # 应用版本号（固定）
@@ -13,14 +17,13 @@ OOPZ_CONFIG = {
     # 渠道（固定）
     "channel": "Web",
 
-    # 设备ID（固定）
-    "device_id": "",
+    # 设备ID（动态从注册表读取）
+    "device_id": None,
+    # 用户ID（动态从注册表读取）
+    "person_uid": None,
 
-    # 用户ID（固定）
-    "person_uid": "",
-
-    # JWT Token（固定，服务器下发的长期有效token）
-    "jwt_token": "",
+    # JWT Token（动态从注册表读取）
+    "jwt_token": None,
 
     # 平台信息（固定）
     "platform": "windows",
@@ -84,16 +87,25 @@ def get_config(key: str = None):
 
 def get_person_uid():
     """获取用户ID"""
+    # 如果配置中没有数据，尝试从注册表读取
+    if not OOPZ_CONFIG["person_uid"]:
+        update_config_with_login_data()
     return OOPZ_CONFIG["person_uid"]
 
 
 def get_jwt_token():
     """获取JWT Token"""
+    # 如果配置中没有数据，尝试从注册表读取
+    if not OOPZ_CONFIG["jwt_token"]:
+        update_config_with_login_data()
     return OOPZ_CONFIG["jwt_token"]
 
 
 def get_device_id():
     """获取设备ID"""
+    # 如果配置中没有数据，尝试从注册表读取
+    if not OOPZ_CONFIG["device_id"]:
+        update_config_with_login_data()
     return OOPZ_CONFIG["device_id"]
 
 
@@ -114,5 +126,69 @@ CUSTOM_CONFIG = {
     # "default_channel": "你的频道ID",
 }
 
+
+def quick_read_oopz_login():
+    """快速读取 Oopz 登录数据"""
+    try:
+        # 直接读取注册表
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"SOFTWARE\Oopz\OopzData", 0, winreg.KEY_READ) as key:
+            login_data, _ = winreg.QueryValueEx(key, "login")
+
+            # 解码 Base64
+            decoded = base64.b64decode(login_data)
+
+            # 解析 JSON
+            json_data = json.loads(decoded.decode('utf-8'))
+
+            return json_data
+
+    except Exception as e:
+        print(f"读取失败: {e}")
+        return None
+
+
+def get_dynamic_config():
+    """获取动态配置数据"""
+    login_data = quick_read_oopz_login()
+    if login_data:
+        return {
+            "device_id": login_data.get("deviceId"),
+            "person_uid": login_data.get("uid"),
+            "jwt_token": login_data.get("signature"),
+            "base_url": login_data.get("endpoint", "https://gateway.oopz.cn")
+        }
+    return None
+
+
+def update_config_with_login_data():
+    """使用登录数据更新配置"""
+    dynamic_config = get_dynamic_config()
+    if dynamic_config:
+        OOPZ_CONFIG.update(dynamic_config)
+        return True
+    return False
+
+
 # 合并自定义配置
 OOPZ_CONFIG.update(CUSTOM_CONFIG)
+
+# 在模块导入时自动更新配置
+update_config_with_login_data()
+
+# 测试函数
+if __name__ == "__main__":
+    data = quick_read_oopz_login()
+    if data:
+        print("登录数据:")
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+
+        # 测试动态配置更新
+        if update_config_with_login_data():
+            print("\n配置更新成功:")
+            print(f"设备ID: {get_device_id()}")
+            print(f"用户ID: {get_person_uid()}")
+            print(f"JWT Token: {get_jwt_token()}")
+        else:
+            print("配置更新失败")
+    else:
+        print("无法读取登录数据")
