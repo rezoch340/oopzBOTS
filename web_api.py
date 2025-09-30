@@ -283,10 +283,17 @@ async def play_next(request: Request, channel: Optional[str] = None):
         # 调用 AudioService 播放
         try:
             import requests as req
+            import uuid
+            
+            # 生成播放UUID并保存到歌曲数据
+            play_uuid = str(uuid.uuid4())
+            next_song['play_uuid'] = play_uuid
+            queue_manager.set_current(next_song)
+            
             url = next_song.get('url')
             model = 'qq' if next_song.get('platform') == 'qq' else None
             
-            params = {"url": url}
+            params = {"url": url, "uuid": play_uuid}
             if model:
                 params["model"] = model
             

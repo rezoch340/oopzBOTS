@@ -16,6 +16,13 @@
   - `/queue` 查看当前队列
   - `/stop` 停止播放
   - 自动播放下一首（播放完成后自动切换）
+  - 🆕 **UUID 追踪系统** - 每首歌曲有唯一 UUID，精确追踪播放状态
+
+- **🎯 智能状态管理** 🆕
+  - **职责分离设计** - Python 和 AudioService 清晰的职责划分
+  - **自动状态清理** - 播放完成后自动清空状态，避免卡住
+  - **实时状态同步** - 通过 Redis 实现 Python 和 C# 之间的状态同步
+  - **完整生命周期追踪** - 从播放开始到结束的完整日志链路
 
 - **智能图片缓存**
   - 自动缓存歌曲封面，避免重复上传到 Oopz
@@ -196,6 +203,7 @@ python main.py
 │  - WebSocket 消息处理                                │
 │  - 命令解析和路由                                     │
 │  - 队列管理集成                                       │
+│  - 🆕 UUID 生成和管理                                │
 │  - 日志记录 (logger)                                 │
 └──────┬──────────────────────────────────────────────┘
        │
@@ -207,7 +215,7 @@ python main.py
        │
        ├─► queue_manager.py (Redis)
        │   - 播放队列管理
-       │   - 当前播放状态
+       │   - 当前播放状态 (含 play_uuid)
        │   - 播放历史
        │   - 日志记录 (logger)
        │
@@ -304,29 +312,46 @@ Web 后台认证模块：
    - 缓存命中：直接使用缓存的 attachment 数据
    - 缓存未命中：上传到 Oopz 并保存到缓存
 5. **添加到队列**: 歌曲信息存入 Redis 队列
-6. **开始播放**: 
-   - 如果是第一首，立即播放
+6. **生成 UUID**: 🆕 为播放生成唯一标识符
+7. **开始播放**: 
+   - 如果是第一首，立即播放（传递 UUID）
    - 否则排队等待
-7. **记录统计**: 更新数据库中的播放次数和统计数据
-8. **发送消息**: 回复用户歌曲信息和队列位置（带封面）
-9. **日志记录**: 记录所有操作到日志文件 🆕
+8. **写入状态**: 🆕 将歌曲信息（含 UUID）写入 `music:current`
+9. **记录统计**: 更新数据库中的播放次数和统计数据
+10. **发送消息**: 回复用户歌曲信息和队列位置（带封面）
+11. **日志记录**: 记录所有操作和 UUID 到日志文件
 
 ### 自动播放流程 🆕
 
 ```
 播放监控线程 (每 5 秒检查一次)
     │
-    ├─► 检查播放器状态
-    │   │
-    │   ├─► 正在播放 → 继续监控
-    │   │
-    │   └─► 未播放
-    │       │
-    │       ├─► 有当前歌曲 + 队列不为空
-    │       │   └─► 自动播放下一首 + 发送消息通知
-    │       │
-    │       └─► 无当前歌曲 + 队列有歌曲
-    │           └─► 开始播放 + 发送消息通知
+    ├─► 检查播放器状态 (从 Redis)
+    │   - playing: false/true
+    │   - playUuid: null/uuid
+    │
+    ├─► 正在播放 (playing=true) → 继续监控
+    │
+    └─► 未播放 (playing=false)
+        │
+        ├─► music:current 存在 + playUuid=null → 播放完成
+        │   │
+        │   └─► 队列不为空
+        │       ├─► 从队列取出下一首
+        │       ├─► 生成新的 UUID 🆕
+        │       ├─► 写入 music:current (含 UUID) 🆕
+        │       ├─► 调用 AudioService 播放 (传递 UUID) 🆕
+        │       └─► 发送播放通知
+        │
+        └─► music:current 不存在 + 队列有歌曲
+            └─► 开始播放第一首 (同上流程)
+
+AudioService 播放完成时:
+    ├─► 清理临时文件
+    ├─► playUuid = null 🆕
+    ├─► 同步状态到 Redis (playing=false, playUuid=null) 🆕
+    └─► 删除 music:current 键 🆕
+        └─► Python 监控检测到 → 触发下一首播放
 ```
 
 ### 日志流工作原理 🆕
@@ -500,9 +525,51 @@ oopzBOTS/
 - **日志文件过大**: 使用清空日志功能
 - **日志轮转失败**: 检查磁盘空间
 
+### UUID 播放状态问题 🆕
+- **播放完成后卡住**
+  - 检查 AudioService 是否连接 Redis
+  - 查看 AudioService 日志是否有 "已清空 music:current"
+  - 验证 Redis 中 `music:current` 是否被删除
+  - 确认 `music:player_status` 中 `playUuid` 是否为 null
+  
+- **UUID 追踪失败**
+  - 检查 Python 日志是否显示 "播放响应 (UUID: xxx)"
+  - 检查 AudioService 日志是否显示 "正在播放: xxx (UUID: xxx)"
+  - 确认调用了 `queue_manager.set_current(next_song)`
+  
+- **自动播放不工作**
+  - 验证监控线程是否运行
+  - 检查 `music:player_status` 状态是否正确更新
+  - 查看是否有 "自动播放: 开始播放" 日志
+  
+**调试命令：**
+```bash
+# 检查 Redis 状态
+redis-cli -h 192.168.1.4 -p 6379 -a redis_ywKGBX
+
+# 查看当前播放
+GET music:current
+
+# 查看播放器状态
+GET music:player_status
+
+# 查看队列
+LRANGE music:queue 0 -1
+```
+
 ## 📝 更新日志
 
-### v1.1.0 (2025-10-01) 🆕
+### v1.2.0 (2025-09-30) 🎯 重大更新
+- 🔥 **UUID 播放状态管理系统** - 解决播放完成卡住的关键 bug
+- ✅ **职责分离设计** - Python 写入，AudioService 清空，责任明确
+- 🎯 **精确状态追踪** - 每首歌曲有唯一 UUID 标识
+- ⚡ **自动状态清理** - 播放完成后自动清空 `music:current`
+- 📊 **实时状态同步** - `music:player_status` 实时更新
+- 🐛 修复自动播放失效问题
+- 🐛 修复状态同步不一致问题
+- 📝 新增 `UUID播放状态管理说明.md` 技术文档
+
+### v1.1.0 (2025-10-01)
 - ✨ 新增统一日志系统
 - ✨ 新增实时日志流（SSE）
 - ✨ 新增 Web 身份认证
@@ -531,11 +598,32 @@ oopzBOTS/
 4. 可以暂停/继续查看
 5. 支持自动滚动到最新
 
+### UUID 播放追踪 🆕
+1. **查看播放 UUID**
+   - Python 日志: `播放响应 (UUID: xxx)`
+   - AudioService 日志: `正在播放: ... (UUID: xxx)`
+   - Redis 中 `music:current` 包含 `play_uuid` 字段
+
+2. **追踪完整生命周期**
+   ```
+   [Python] 生成 UUID → 播放开始
+   [AudioService] 接收 UUID → 播放中
+   [AudioService] 播放完成 (UUID: xxx)
+   [AudioService] 已清空 music:current
+   [Python] 自动播放: 开始播放下一首
+   ```
+
+3. **调试技巧**
+   - 对比 Python 和 AudioService 的 UUID 日志
+   - 确认 UUID 在整个流程中保持一致
+   - 播放完成后 UUID 应变为 null
+
 ### 队列管理技巧
 1. 添加多首歌曲会自动排队
 2. 使用 `/next` 跳过当前歌曲
 3. Web 后台可以查看队列顺序
 4. 自动播放完会切换下一首
+5. 🆕 每首歌都有唯一 UUID，便于追踪
 
 ### 缓存优化
 1. 常播放的歌曲会自动缓存封面

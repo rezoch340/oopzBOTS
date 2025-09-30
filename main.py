@@ -187,9 +187,15 @@ def handle_command(msg_data, sender):
                 next_song['channel'] = channel
                 queue_manager.set_current(next_song)  # 更新 Redis 中的当前歌曲
             
+            # 生成播放UUID并保存到歌曲数据
+            import uuid
+            play_uuid = str(uuid.uuid4())
+            next_song['play_uuid'] = play_uuid
+            queue_manager.set_current(next_song)  # 更新包含UUID的歌曲数据
+            
             # 根据平台决定播放参数
             model = 'qq' if next_song.get('platform') == 'qq' else None
-            t = threading.Thread(target=play, args=(next_song['url'], model))
+            t = threading.Thread(target=play, args=(next_song['url'], model, play_uuid))
             t.start()
             
             # 构建完整的消息
@@ -381,7 +387,13 @@ def netPlay(keyword, channel=None, user=None):
     if not is_playing and current_song is None and queue_position == 0:
         next_song = queue_manager.play_next()
         if next_song:
-            t = threading.Thread(target=play, args=(next_song['url'],))
+            # 生成播放UUID并保存
+            import uuid
+            play_uuid = str(uuid.uuid4())
+            next_song['play_uuid'] = play_uuid
+            queue_manager.set_current(next_song)
+            
+            t = threading.Thread(target=play, args=(next_song['url'], None, play_uuid))
             t.start()
             text += "\n▶️ 立即播放"
     else:
@@ -479,7 +491,13 @@ def bilibiliMp3(keyword, channel=None, user=None):
     if not is_playing and current_song is None and queue_position == 0:
         next_song = queue_manager.play_next()
         if next_song:
-            t = threading.Thread(target=play, args=(next_song['url'],))
+            # 生成播放UUID并保存
+            import uuid
+            play_uuid = str(uuid.uuid4())
+            next_song['play_uuid'] = play_uuid
+            queue_manager.set_current(next_song)
+            
+            t = threading.Thread(target=play, args=(next_song['url'], None, play_uuid))
             t.start()
             text += "\n▶️ 立即播放"
     else:
@@ -563,7 +581,13 @@ def qqPlay(keyword, channel=None, user=None):
     if not is_playing and current_song is None and queue_position == 0:
         next_song = queue_manager.play_next()
         if next_song:
-            t = threading.Thread(target=play, args=(next_song['url'], 'qq'))
+            # 生成播放UUID并保存
+            import uuid
+            play_uuid = str(uuid.uuid4())
+            next_song['play_uuid'] = play_uuid
+            queue_manager.set_current(next_song)
+            
+            t = threading.Thread(target=play, args=(next_song['url'], 'qq', play_uuid))
             t.start()
             text += "\n▶️ 立即播放"
     else:
@@ -574,11 +598,22 @@ def qqPlay(keyword, channel=None, user=None):
     return {"code": "success", "message": text, "attachments": attachments}
 
 
-def play(url, model=None):
-    """播放音乐"""
+def play(url, model=None, uuid=None):
+    """播放音乐
+    
+    Args:
+        url: 音频URL
+        model: 播放模式（如 'qq'）
+        uuid: 播放追踪UUID
+    
+    Returns:
+        播放响应数据
+    """
     params = {"url": url}
     if model:
         params["model"] = model
+    if uuid:
+        params["uuid"] = uuid
 
     resp = requests.get(f"{AUDIOSERVICE}/play", params=params)
 
@@ -587,7 +622,7 @@ def play(url, model=None):
     except Exception:
         data = {"status": False, "code": resp.status_code, "message": resp.text}
 
-    logger.debug(f"播放响应: {data}")
+    logger.debug(f"播放响应 (UUID: {uuid}): {data}")
     return data
 
 
@@ -676,8 +711,15 @@ def auto_play_next_monitor():
                         next_song = queue_manager.play_next()
                         if next_song:
                             logger.info(f"自动播放: 开始播放 - {next_song.get('name')}")
+                            
+                            # 生成播放UUID并保存
+                            import uuid
+                            play_uuid = str(uuid.uuid4())
+                            next_song['play_uuid'] = play_uuid
+                            queue_manager.set_current(next_song)
+                            
                             model = 'qq' if next_song.get('platform') == 'qq' else None
-                            play(next_song['url'], model)
+                            play(next_song['url'], model, play_uuid)
                             last_play_time = current_time
                             
                             # 发送播放通知
@@ -696,8 +738,15 @@ def auto_play_next_monitor():
                     next_song = queue_manager.play_next()
                     if next_song:
                         print(f"[自动播放] 开始播放: {next_song.get('name')}")
+                        
+                        # 生成播放UUID并保存
+                        import uuid
+                        play_uuid = str(uuid.uuid4())
+                        next_song['play_uuid'] = play_uuid
+                        queue_manager.set_current(next_song)
+                        
                         model = 'qq' if next_song.get('platform') == 'qq' else None
-                        play(next_song['url'], model)
+                        play(next_song['url'], model, play_uuid)
                         last_play_time = current_time
                         
                         # 发送播放通知
