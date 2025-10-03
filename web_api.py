@@ -22,12 +22,17 @@ from fastapi import FastAPI, HTTPException, Query, Request, Form
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis
+from starlette.responses import Response
 
 from database import init_database, ImageCache, SongCache, Statistics
 from queue_manager import QueueManager
 from config import REDIS_CONFIG, AudioService
 import oopz_sender
-from auth import require_auth, verify_credentials, create_login_response, create_logout_response, get_token_from_request, verify_token
+from auth import require_auth, verify_credentials, create_login_response, create_logout_response, \
+    get_token_from_request, verify_token
+from netease import NeteaseCloud
+from bilibili import Bilibili
+from qqmusic import QQmusic
 
 # Bilibili 相关配置
 QC_SALT = "6HTugjCXxR"
@@ -47,6 +52,25 @@ redis_client: Optional[Redis] = None
 queue_manager: Optional[QueueManager] = None
 sender = oopz_sender.SimpleOopzSender()  # Oopz 消息发送器
 
+# 初始化音乐API
+try:
+    netease_api = NeteaseCloud()
+except Exception as e:
+    print(f"[WARNING] 网易云API初始化失败: {e}")
+    netease_api = None
+
+try:
+    bilibili_api = Bilibili()
+except Exception as e:
+    print(f"[WARNING] B站API初始化失败: {e}")
+    bilibili_api = None
+
+try:
+    qq_api = QQmusic()
+except Exception as e:
+    print(f"[WARNING] QQ音乐API初始化失败: {e}")
+    qq_api = None
+
 # 系统监控 - 记录启动时间
 app_start_time = datetime.now()
 process = psutil.Process()
@@ -59,6 +83,7 @@ network_data_lock = threading.Lock()
 system_info_cache = {"data": None, "timestamp": None, "lock": threading.Lock()}
 CACHE_DURATION = 2  # 缓存2秒
 
+
 # CPU监控预热任务
 def cpu_warmup_task():
     """定期调用CPU监控以获得准确的使用率数据"""
@@ -68,6 +93,7 @@ def cpu_warmup_task():
             time.sleep(5)  # 每5秒执行一次
         except Exception:
             time.sleep(10)  # 出错时延长等待
+
 
 # 启动CPU预热线程
 cpu_warmup_thread = threading.Thread(target=cpu_warmup_task, daemon=True)
@@ -135,10 +161,10 @@ def build_bilibili_headers(video_url: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global redis_client, queue_manager
-    
+
     # 初始化数据库
     init_database()
-    
+
     # 初始化 Redis（从配置文件读取）
     redis_client = Redis(
         host=REDIS_CONFIG["host"],
@@ -147,10 +173,10 @@ async def lifespan(app: FastAPI):
         decode_responses=REDIS_CONFIG["decode_responses"],
         password=REDIS_CONFIG["password"]
     )
-    
+
     # 初始化队列管理器（使用配置）
     queue_manager = QueueManager(redis_config=REDIS_CONFIG)
-    
+
     # 初始化系统监控 - 预热网络数据
     try:
         net_io = psutil.net_io_counters()
@@ -162,9 +188,9 @@ async def lifespan(app: FastAPI):
         })
     except Exception as e:
         print(f"系统监控初始化警告: {e}")
-    
+
     print("Web API 启动完成")
-    
+
     try:
         yield
     finally:
@@ -183,10 +209,34 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def custom_cors(request: Request, call_next):
+    origin = request.headers.get("origin")
+    response: Response = await call_next(request)
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+        response.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type"
+    return response
+
+# @app.middleware("http")
+# async def custom_cors_middleware(request: Request, call_next):
+#     origin = request.headers.get("origin")
+#     response: Response = await call_next(request)
+#
+#     if origin:
+#         response.headers["Access-Control-Allow-Origin"] = origin
+#         response.headers["Access-Control-Allow-Methods"] = "GET,POST,PUT,DELETE,OPTIONS"
+#         response.headers["Access-Control-Allow-Headers"] = "Authorization,Content-Type"
+#         response.headers["Access-Control-Allow-Credentials"] = "true"
+#     return response
 
 
 # ========= Bilibili API =========
@@ -313,6 +363,50 @@ def add_to_queue(song_data: dict):
     }
 
 
+def refetch_play_url(song_data: dict) -> Optional[str]:
+    """重新获取播放URL（当URL缺失或过期时）
+    
+    Args:
+        song_data: 歌曲数据，需包含 song_id 和 platform
+    
+    Returns:
+        播放URL，如果获取失败返回 None
+    """
+    platform = song_data.get('platform')
+    song_id = song_data.get('song_id')
+    
+    if not platform or not song_id:
+        print(f"[ERROR] 无法重新获取URL: 缺少 platform 或 song_id")
+        return None
+    
+    try:
+        if platform == 'netease' and netease_api:
+            result = netease_api.song(song_id)
+            if result['code'] == 'success':
+                url = result['data']['url'].get('url')
+                print(f"[INFO] 成功重新获取网易云播放URL: {song_id}")
+                return url
+                
+        elif platform == 'bilibili' and bilibili_api:
+            result = bilibili_api.summarize(song_id)
+            if result['code'] == 'success':
+                url = result['data']['url']
+                print(f"[INFO] 成功重新获取B站播放URL: {song_id}")
+                return url
+                
+        elif platform == 'qq' and qq_api:
+            # QQ音乐需要额外的参数
+            print(f"[WARNING] QQ音乐需要 songmid 和 strMediaMid，无法从 song_id 直接获取")
+            return None
+            
+        print(f"[ERROR] 不支持的平台或API未初始化: {platform}")
+        return None
+        
+    except Exception as e:
+        print(f"[ERROR] 重新获取播放URL失败: {e}")
+        return None
+
+
 @app.post("/api/queue/next")
 @require_auth
 async def play_next(request: Request, channel: Optional[str] = None):
@@ -327,12 +421,12 @@ async def play_next(request: Request, channel: Optional[str] = None):
         try:
             import requests as req
             import uuid
-            
+
             # 生成播放UUID并保存到歌曲数据
             play_uuid = str(uuid.uuid4())
             next_song['play_uuid'] = play_uuid
             queue_manager.set_current(next_song)
-            
+
             # 🔥 更新播放统计（实际播放时）
             SongCache.update_play_stats(
                 song_id=next_song.get('song_id'),
@@ -340,23 +434,33 @@ async def play_next(request: Request, channel: Optional[str] = None):
                 channel_id=channel or next_song.get('channel'),
                 user_id=None  # Web API 调用时没有用户信息
             )
-            
+
             # 更新平台统计
             Statistics.update_today(next_song.get('platform'), cache_hit=False)
-            
+
+            # 检查URL是否存在，如果不存在则重新获取
             url = next_song.get('url')
-            model = 'qq' if next_song.get('platform') == 'qq' else None
+            if not url:
+                print(f"[WARNING] 歌曲缺少播放URL，尝试重新获取: {next_song.get('name')}")
+                url = refetch_play_url(next_song)
+                if url:
+                    next_song['url'] = url  # 更新歌曲数据
+                    print(f"[INFO] 已更新播放URL")
+                else:
+                    raise ValueError("无法获取播放URL，歌曲链接可能已过期")
             
+            model = 'qq' if next_song.get('platform') == 'qq' else None
+
             params = {"url": url, "uuid": play_uuid}
             if model:
                 params["model"] = model
-            
+
             play_response = req.get(f"{AUDIOSERVICE_URL}/play", params=params, timeout=5)
-            
+
             # 如果没有提供 channel，尝试从 Redis 获取默认频道
             if not channel:
                 channel = queue_manager.get_default_channel()
-            
+
             # 如果有频道，发送消息到 Oopz
             if channel:
                 try:
@@ -366,9 +470,9 @@ async def play_next(request: Request, channel: Optional[str] = None):
                         'qq': 'QQ音乐',
                         'bilibili': 'B站'
                     }.get(platform, '未知')
-                    
+
                     text = f"⏭️ 切换到下一首 (Web):\n来自于{platform_name}:\n"
-                    
+
                     # B站特殊处理
                     if platform == 'bilibili':
                         text += f"🎵 标题: {next_song['name']}\n"
@@ -381,17 +485,17 @@ async def play_next(request: Request, channel: Optional[str] = None):
                             text += f"💽 专辑: {next_song['album']}\n"
                         if next_song.get('duration'):
                             text += f"⏱ 时长: {next_song['duration']}"
-                    
+
                     # 获取附件
                     attachments = next_song.get('attachments', [])
                     if attachments and len(attachments) > 0:
                         att = attachments[0]
                         text = f"![IMAGEw{att['width']}h{att['height']}]({att['fileKey']})\n" + text
-                    
+
                     sender.send_message(text=text.rstrip(), attachments=attachments, channel=channel)
                 except Exception as e:
                     print(f"发送 Oopz 消息失败: {e}")
-            
+
             return {
                 "status": "success",
                 "message": "已切换到下一首",
@@ -508,7 +612,7 @@ async def get_summary_statistics(request: Request):
     image_stats = ImageCache.get_stats()
     queue_length = queue_manager.get_queue_length()
     system_info = get_cached_system_info()  # 获取缓存的系统信息
-    
+
     return {
         "today": today,
         "queue_length": queue_length,
@@ -528,13 +632,13 @@ def format_bytes(bytes_value: int) -> str:
     """格式化字节数为可读格式"""
     if bytes_value == 0:
         return "0 B"
-    
+
     units = ['B', 'KB', 'MB', 'GB', 'TB']
     i = 0
     while bytes_value >= 1024 and i < len(units) - 1:
         bytes_value /= 1024.0
         i += 1
-    
+
     return f"{bytes_value:.1f} {units[i]}"
 
 
@@ -559,50 +663,50 @@ def format_duration(seconds: float) -> str:
 def get_cached_system_info() -> dict:
     """获取缓存的系统监控信息"""
     global system_info_cache
-    
+
     with system_info_cache["lock"]:
         now = datetime.now()
-        
+
         # 检查缓存是否有效
-        if (system_info_cache["data"] is not None and 
-            system_info_cache["timestamp"] is not None and 
-            (now - system_info_cache["timestamp"]).total_seconds() < CACHE_DURATION):
+        if (system_info_cache["data"] is not None and
+                system_info_cache["timestamp"] is not None and
+                (now - system_info_cache["timestamp"]).total_seconds() < CACHE_DURATION):
             return system_info_cache["data"]
-        
+
         # 缓存过期或不存在，重新获取
         try:
             # 运行时长
             uptime_seconds = (now - app_start_time).total_seconds()
-            
+
             # CPU信息 - 非阻塞
             cpu_percent = psutil.cpu_percent(interval=0)
             cpu_count = psutil.cpu_count()
-            
+
             # 内存信息
             memory = psutil.virtual_memory()
-            
+
             # 网络信息（简化版）
             net_io = psutil.net_io_counters()
-            
+
             # 计算网络速度
             global last_network_data
             with network_data_lock:
                 time_diff = (now - last_network_data["timestamp"]).total_seconds()
-                
+
                 if time_diff > 0 and last_network_data["bytes_sent"] > 0:
                     bytes_sent_per_sec = max(0, (net_io.bytes_sent - last_network_data["bytes_sent"]) / time_diff)
                     bytes_recv_per_sec = max(0, (net_io.bytes_recv - last_network_data["bytes_recv"]) / time_diff)
                 else:
                     bytes_sent_per_sec = 0
                     bytes_recv_per_sec = 0
-                
+
                 # 更新上次数据
                 last_network_data = {
                     "timestamp": now,
                     "bytes_sent": net_io.bytes_sent,
                     "bytes_recv": net_io.bytes_recv
                 }
-            
+
             # 进程信息 - 带错误处理
             global process
             try:
@@ -618,7 +722,7 @@ def get_cached_system_info() -> dict:
                     # 如果还是出错，使用默认值
                     process_memory = type('obj', (object,), {'rss': 0, 'vms': 0})
                     process_cpu = 0.0
-            
+
             # 构建返回数据
             data = {
                 "timestamp": get_china_time(),
@@ -633,13 +737,13 @@ def get_cached_system_info() -> dict:
                 "process_memory_formatted": format_bytes(process_memory.rss),
                 "process_cpu": round(process_cpu, 1)
             }
-            
+
             # 更新缓存
             system_info_cache["data"] = data
             system_info_cache["timestamp"] = now
-            
+
             return data
-            
+
         except Exception as e:
             # 如果获取失败，返回错误信息
             error_data = {
@@ -657,41 +761,41 @@ async def get_system_info(request: Request):
     try:
         # 运行时长
         uptime_seconds = (datetime.now() - app_start_time).total_seconds()
-        
+
         # CPU 信息 - 非阻塞获取（使用上次调用的结果）
         cpu_percent = psutil.cpu_percent(interval=0)
         cpu_count = psutil.cpu_count()
         cpu_freq = psutil.cpu_freq()
-        
+
         # 内存信息 - 实时
         memory = psutil.virtual_memory()
-        
+
         # 磁盘信息 - 实时
         disk = psutil.disk_usage('.')
-        
+
         # 网络信息 - 计算实时速度
         net_io = psutil.net_io_counters()
         current_time = datetime.now()
-        
+
         # 计算网络速度（线程安全）
         global last_network_data
         with network_data_lock:
             time_diff = (current_time - last_network_data["timestamp"]).total_seconds()
-            
+
             if time_diff > 0 and last_network_data["bytes_sent"] > 0:
                 bytes_sent_per_sec = max(0, (net_io.bytes_sent - last_network_data["bytes_sent"]) / time_diff)
                 bytes_recv_per_sec = max(0, (net_io.bytes_recv - last_network_data["bytes_recv"]) / time_diff)
             else:
                 bytes_sent_per_sec = 0
                 bytes_recv_per_sec = 0
-            
+
             # 更新上次数据
             last_network_data = {
                 "timestamp": current_time,
                 "bytes_sent": net_io.bytes_sent,
                 "bytes_recv": net_io.bytes_recv
             }
-        
+
         # 进程信息 - 实时获取当前进程资源使用
         global process
         try:
@@ -702,7 +806,7 @@ async def get_system_info(request: Request):
             process = psutil.Process()
             process_memory = process.memory_info()
             process_cpu = process.cpu_percent()
-        
+
         return {
             "timestamp": get_china_time(),
             "uptime": {
@@ -756,18 +860,18 @@ async def get_system_info(request: Request):
         return {"error": str(e), "timestamp": get_china_time()}
 
 
-@app.get("/api/system/stats")  
+@app.get("/api/system/stats")
 @require_auth
 async def get_system_stats(request: Request):
     """获取简化的系统统计信息"""
     try:
         # 运行时长
         uptime_seconds = (datetime.now() - app_start_time).total_seconds()
-        
+
         # 快速获取实时关键指标
         cpu_percent = psutil.cpu_percent(interval=0.1)  # 快速获取实时CPU
         memory = psutil.virtual_memory()
-        
+
         return {
             "uptime": format_duration(uptime_seconds),
             "cpu_usage": f"{cpu_percent}%",
@@ -791,24 +895,24 @@ async def get_logs(request: Request, lines: int = Query(100, ge=1, le=1000)):
     """
     import os
     log_file = "logs/oopz_bot.log"
-    
+
     if not os.path.exists(log_file):
         return {"status": "error", "message": "日志文件不存在", "logs": []}
-    
+
     try:
         with open(log_file, 'r', encoding='utf-8') as f:
             # 读取所有行
             all_lines = f.readlines()
             # 返回最后 N 行
             last_lines = all_lines[-lines:] if len(all_lines) > lines else all_lines
-            
+
             # 解析每一行日志
             logs = []
             for line in last_lines:
                 line = line.strip()
                 if line:
                     logs.append(line)
-            
+
             return {
                 "status": "success",
                 "total": len(all_lines),
@@ -825,10 +929,10 @@ async def stream_logs(request: Request):
     """实时流式输出日志（SSE）"""
     import os
     import asyncio
-    
+
     async def log_generator():
         log_file = "logs/oopz_bot.log"
-        
+
         # 先发送现有日志的最后 50 行
         if os.path.exists(log_file):
             try:
@@ -839,7 +943,7 @@ async def stream_logs(request: Request):
                         line = line.strip()
                         if line:
                             yield f"data: {line}\n\n"
-                    
+
                     # 记录当前文件位置
                     last_pos = f.tell()
             except Exception as e:
@@ -848,19 +952,19 @@ async def stream_logs(request: Request):
         else:
             yield f"data: [INFO] 等待日志文件创建...\n\n"
             last_pos = 0
-        
+
         # 实时监控新日志
         while True:
             # 检查客户端是否断开连接
             if await request.is_disconnected():
                 break
-            
+
             try:
                 if os.path.exists(log_file):
                     with open(log_file, 'r', encoding='utf-8') as f:
                         # 跳到上次读取的位置
                         f.seek(last_pos)
-                        
+
                         # 读取新内容
                         new_lines = f.readlines()
                         if new_lines:
@@ -868,17 +972,17 @@ async def stream_logs(request: Request):
                                 line = line.strip()
                                 if line:
                                     yield f"data: {line}\n\n"
-                        
+
                         # 更新位置
                         last_pos = f.tell()
-                
+
                 # 等待 1 秒后继续检查
                 await asyncio.sleep(1)
-                
+
             except Exception as e:
                 yield f"data: [ERROR] 读取日志失败: {e}\n\n"
                 await asyncio.sleep(5)
-    
+
     return StreamingResponse(
         log_generator(),
         media_type="text/event-stream",
@@ -890,14 +994,13 @@ async def stream_logs(request: Request):
     )
 
 
-
 @app.delete("/api/logs/clear")
 @require_auth
 async def clear_logs(request: Request):
     """清空日志文件"""
     import os
     log_file = "logs/oopz_bot.log"
-    
+
     try:
         if os.path.exists(log_file):
             with open(log_file, 'w', encoding='utf-8') as f:
@@ -1474,6 +1577,7 @@ async def system_monitoring():
 </html>
 """)
 
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     """简单的仪表盘"""
@@ -1486,7 +1590,7 @@ async def dashboard(request: Request):
                 window.location.href = '/login';
             </script>
         """)
-    
+
     return """
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -2112,4 +2216,5 @@ async def dashboard(request: Request):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
